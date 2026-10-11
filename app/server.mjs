@@ -9,8 +9,9 @@ import { ChatGPTSignIn } from './auth.mjs';
 import { root, executable, run, powershell, openBrowser, chooseFolder, redact } from './platform.mjs';
 import { readState, saveState, projectPath, readCredential, stateDirectory } from './storage.mjs';
 import { Automation, outcomeSchema, readAutomationConfig } from './automation.mjs';
+import { serviceQuery, collectServices, inspectServices, serviceReport } from './service-tools.mjs';
 
-export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository } = {}) {
+export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices } = {}) {
   const state = await readState();
   const defaultFolder = await fs.realpath(process.env.VOLTERRA_OS_ROOT || root);
   if (!state.selected || (process.env.VOLTERRA_OS_ROOT && state.selected !== defaultFolder)) {
@@ -28,6 +29,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
   let origin, sessionCookieName, account = null, activeTurn = null, loadedThread = null, paused = false, pauseRequested = false, restartRequired = false, github = null, runtimeToken = null, runtimeStart, automation, runtimeReady = false;
   let progressPhase = null, progressSince = new Date().toISOString(), lastActivityAt = journal.at(-1)?.time || null, connectionsChecked = false;
   const finalMessages = new Map();
+  let systemTool = null;
   const selected = () => state.selected && state.projects[state.selected];
   function event(type, data) {
     const entry = JSON.parse(redact(JSON.stringify({ type, data, time: new Date().toISOString() })));
@@ -42,9 +44,9 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
   }
   const snapshot = () => {
     const savedPhase = automation?.saved.phase;
-    const phase = approvals.size ? 'question' : activeTurn && !['working', 'reviewing', 'reviewing-update'].includes(savedPhase) ? 'replying' : paused ? 'paused' : savedPhase || (activeTurn ? 'working' : 'idle');
-    if (phase !== progressPhase) { progressPhase = phase; progressSince = new Date().toISOString(); }
-    return { project: selected() || null, projects: Object.values(state.projects), authMode: state.authMode, account, github, connectionsChecked, automation: automation?.snapshot() || null, running: !!codex.child, runtimeReady: runtimeReady && !!codex.child, activeTurn, paused, interruptRequested: pauseRequested, progress: { phase, since: progressSince, lastActivityAt }, restartRequired: restartRequired || automation?.saved.phase === 'restart-pending', approvals: [...approvals.values()], journal: journal.slice(-300), sourceArtwork: 'Approved reference artwork; sample labels are part of the reference', implementation: 'Development prototype' };
+    const phase = approvals.size ? 'question' : systemTool ? 'checking' : activeTurn && !['working', 'reviewing', 'reviewing-update'].includes(savedPhase) ? 'replying' : paused ? 'paused' : savedPhase || (activeTurn ? 'working' : 'idle');
+    if (phase !== progressPhase || (phase === 'checking' && systemTool && progressSince !== systemTool.since)) { progressPhase = phase; progressSince = phase === 'checking' && systemTool ? systemTool.since : new Date().toISOString(); }
+    return { project: selected() || null, projects: Object.values(state.projects), authMode: state.authMode, account, github, connectionsChecked, automation: automation?.snapshot() || null, running: !!codex.child, runtimeReady: runtimeReady && !!codex.child, activeTurn, paused, systemTool, interruptRequested: pauseRequested, progress: { phase, since: progressSince, lastActivityAt }, restartRequired: restartRequired || automation?.saved.phase === 'restart-pending', approvals: [...approvals.values()], journal: journal.slice(-300), sourceArtwork: 'Approved reference artwork; sample labels are part of the reference', implementation: 'Development prototype' };
   };
   const publish = () => event('state', snapshot());
   const auth = new ChatGPTSignIn(state, async () => {
@@ -165,6 +167,18 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     'project/resume': async () => { const project = await ensureThread(); return { project }; },
     'agent/send': async body => {
       if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 100_000) throw new Error('Enter a message of up to 100,000 characters.');
+      const query = serviceQuery(body.text);
+      if (query) {
+        if (systemTool) throw new Error('Service inventory is already running.');
+        event('user', body.text);
+        systemTool = { kind: 'services', since: new Date().toISOString() }; publish();
+        event('command', { command: powershell ? `${powershell} -NoProfile -NonInteractive -File "${path.join(root, 'scripts', 'Get-ServiceInventory.ps1')}"` : 'Windows service collector unavailable on this platform', cwd: root });
+        try {
+          const result = await inspectServices(query.filter, serviceCollector);
+          event('output', { itemId: `services-${randomBytes(8).toString('hex')}`, delta: serviceReport(result) });
+          return { tool: 'services', ...result };
+        } finally { systemTool = null; publish(); }
+      }
       const project = await ensureThread();
       const input = [{ type: 'text', text: body.text, text_elements: [] }];
       event('user', body.text);

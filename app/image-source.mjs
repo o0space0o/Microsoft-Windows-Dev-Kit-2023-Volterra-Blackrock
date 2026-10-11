@@ -98,15 +98,19 @@ export async function copyImagePayload(receiptFile, workspace, mount, options = 
   const root = await fs.realpath(workspace), mounted = await fs.realpath(mount);
   if (!/^build\/development-[0-9]{3}\/final-(boot|install)$/.test(path.relative(root, mounted).split(path.sep).join('/'))) throw new Error('Image payload target is not an owned offline build mount.');
   for (const name of ['scripts/Apply-SourceUpdate.mjs', 'image/Volterra-Startup.cmd', 'PROJECT_BRIEF.md']) if (!source.files[name]) throw new Error('Required boot source is missing from the checked commit.');
+  const samePath = (target, real) => path.relative(path.resolve(target), path.resolve(real)) === '';
   async function directory(base, target) {
     if (target !== base && !inside(base, target)) throw new Error('An image directory escaped the offline mount.');
+    const baseInfo = await fs.lstat(base);
+    if (!baseInfo.isDirectory() || baseInfo.isSymbolicLink() || !samePath(base, await fs.realpath(base))) throw new Error('Linked image directories cannot receive source files.');
     const relative = path.relative(base, target);
     let current = base;
     for (const part of relative.split(path.sep).filter(Boolean)) {
       current = path.join(current, part);
       try { await fs.mkdir(current); } catch (error) { if (error.code !== 'EEXIST') throw error; }
       const stat = await fs.lstat(current);
-      if (!stat.isDirectory() || stat.isSymbolicLink() || !inside(base, await fs.realpath(current))) throw new Error('Linked image directories cannot receive source files.');
+      const real = await fs.realpath(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || !inside(base, real) || !samePath(current, real)) throw new Error('Linked image directories cannot receive source files.');
     }
   }
   const payload = path.join(mounted, 'Volterra'); await directory(mounted, payload);
@@ -114,34 +118,50 @@ export async function copyImagePayload(receiptFile, workspace, mount, options = 
   async function collect(folder, prefix) {
     const stat = await fs.lstat(folder).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
     if (!stat) return;
-    if (stat.isSymbolicLink() || !stat.isDirectory() || !inside(payload, await fs.realpath(folder))) throw new Error('Linked image source trees cannot be refreshed.');
+    const real = await fs.realpath(folder);
+    if (stat.isSymbolicLink() || !stat.isDirectory() || !inside(payload, real) || !samePath(folder, real)) throw new Error('Linked image source trees cannot be refreshed.');
     for (const item of await fs.readdir(folder, { withFileTypes: true })) {
       const name = `${prefix}/${item.name}`, target = path.join(folder, item.name);
-      if (item.isSymbolicLink()) throw new Error('Linked image source files cannot be refreshed.');
-      if (item.isDirectory()) await collect(target, name);
-      else { if (!item.isFile() || !allowedSource(name)) throw new Error('The old image source contains a protected or unsupported file.'); existing.push({ name, target }); }
+      // Mounted WIM providers can report misleading Dirent type flags. Inspect
+      // the path itself before treating it as a file or traversing a directory.
+      const info = await fs.lstat(target);
+      const real = await fs.realpath(target);
+      if (info.isSymbolicLink() || !inside(payload, real) || !samePath(target, real)) throw new Error('Linked image source files cannot be refreshed.');
+      if (info.isDirectory()) await collect(target, name);
+      else { if (!info.isFile() || !allowedSource(name)) throw new Error('The old image source contains a protected or unsupported file.'); existing.push({ name, target }); }
     }
   }
   for (const name of ['app', 'scripts', 'test', 'image', 'design']) await collect(path.join(payload, name), name);
   for (const item of await fs.readdir(payload, { withFileTypes: true })) if (allowedSource(item.name)) {
-    if (!item.isFile() || item.isSymbolicLink()) throw new Error('An original source root file is linked or is not a regular file.');
-    existing.push({ name: item.name, target: path.join(payload, item.name) });
+    const target = path.join(payload, item.name), info = await fs.lstat(target);
+    const real = await fs.realpath(target);
+    if (!info.isFile() || info.isSymbolicLink() || !inside(payload, real) || !samePath(target, real)) throw new Error('An original source root file is linked or is not a regular file.');
+    existing.push({ name: item.name, target });
   }
   // Only individually enumerated original-source files can be removed. Private
   // runtime binaries and credentials are outside these source trees.
   for (const item of existing) if (!Object.hasOwn(source.files, item.name)) {
-    if (!inside(payload, await fs.realpath(item.target))) throw new Error('An obsolete source path escaped the payload.');
+    await directory(payload, path.dirname(item.target));
+    const info = await fs.lstat(item.target), real = await fs.realpath(item.target);
+    if (!info.isFile() || info.isSymbolicLink() || !inside(payload, real) || !samePath(item.target, real)) throw new Error('An obsolete source path escaped the payload or is no longer a regular file.');
     await fs.unlink(item.target);
+  }
+  async function destination(base, target) {
+    await directory(base, path.dirname(target));
+    const stat = await fs.lstat(target).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+    if (!stat) return;
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink > 1) throw new Error('An image source destination is linked or is not a regular file.');
+    const real = await fs.realpath(target);
+    if (!inside(base, real) || !samePath(target, real)) throw new Error('An image source destination escaped its boundary.');
   }
   async function write(base, target, bytes, expected) {
     if (!inside(base, target)) throw new Error('An image source destination escaped its boundary.');
-    await directory(base, path.dirname(target));
-    const stat = await fs.lstat(target).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
-    if (stat && (!stat.isFile() || stat.isSymbolicLink() || stat.nlink > 1)) throw new Error('An image source destination is linked or is not a regular file.');
+    await destination(base, target);
     if (hash(bytes) !== expected) throw new Error('Source changed before copying into the image.');
     const temporary = path.join(path.dirname(target), `.volterra-${randomUUID()}.tmp`);
     try {
       await fs.writeFile(temporary, bytes, { flag: 'wx' });
+      await destination(base, target);
       await fs.rename(temporary, target);
     } catch (error) { await fs.unlink(temporary).catch(() => {}); throw error; }
     if (hash(await fs.readFile(target)) !== expected) throw new Error('Copied image source hash changed.');
@@ -149,7 +169,7 @@ export async function copyImagePayload(receiptFile, workspace, mount, options = 
   for (const [name, expected] of Object.entries(source.files)) await write(payload, path.join(payload, name), await fs.readFile(path.join(source.source, name)), expected);
   for (const [name, destination] of [
     ['scripts/Apply-SourceUpdate.mjs', 'Volterra/private/bootstrap/Apply-SourceUpdate.mjs'],
-    ['image/Volterra-Startup.cmd', 'Windows/VolterraStartup.cmd'],
+    ['image/Volterra-Startup.cmd', 'Windows/Volterra-Startup.cmd'],
     ['PROJECT_BRIEF.md', 'PROJECT_BRIEF.md']
   ]) await write(mounted, path.join(mounted, destination), await fs.readFile(path.join(payload, name)), source.files[name]);
   const version = Buffer.from(JSON.stringify({ repository: source.repository, commit: source.commit }));

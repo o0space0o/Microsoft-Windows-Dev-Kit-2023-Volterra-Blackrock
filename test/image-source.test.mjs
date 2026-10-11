@@ -105,14 +105,74 @@ test('offline source copying removes obsolete source, preserves private/vendor f
   await fs.writeFile(path.join(mount, 'Volterra/README.md'), 'Obsolete root source');
   await fs.writeFile(path.join(mount, 'Volterra/private/vendor.exe'), 'Private runtime fixture');
   await fs.writeFile(path.join(mount, 'Windows/vendor.dll'), 'Vendor fixture');
+  await fs.writeFile(path.join(mount, 'Windows/Volterra-Startup.cmd'), 'Stale shell startup command');
   assert.equal((await f.copy(receipt.receiptFile, mount)).commit, receipt.commit);
   await assert.rejects(fs.access(path.join(mount, 'Volterra/app/obsolete.mjs')));
   await assert.rejects(fs.access(path.join(mount, 'Volterra/README.md')));
   assert.equal(await fs.readFile(path.join(mount, 'Volterra/private/vendor.exe'), 'utf8'), 'Private runtime fixture');
   assert.equal(await fs.readFile(path.join(mount, 'Windows/vendor.dll'), 'utf8'), 'Vendor fixture');
   assert.deepEqual(await fs.readFile(path.join(mount, 'Volterra/private/bootstrap/Apply-SourceUpdate.mjs')), await fs.readFile(path.join(receipt.source, 'scripts/Apply-SourceUpdate.mjs')));
-  assert.deepEqual(await fs.readFile(path.join(mount, 'Windows/VolterraStartup.cmd')), await fs.readFile(path.join(receipt.source, 'image/Volterra-Startup.cmd')));
+  assert.deepEqual(await fs.readFile(path.join(mount, 'Windows/Volterra-Startup.cmd')), await fs.readFile(path.join(receipt.source, 'image/Volterra-Startup.cmd')));
+  await assert.rejects(fs.access(path.join(mount, 'Windows/VolterraStartup.cmd')));
   assert.equal(JSON.parse(await fs.readFile(path.join(mount, 'Volterra/private/source-version.json'), 'utf8')).commit, receipt.commit);
+});
+
+test('offline copying uses lstat when mounted provider Dirents misidentify regular files and directories as links', async t => {
+  const f = await fixture(t), receipt = await f.prepare(), mount = path.join(f.directory, 'build/development-900/final-install');
+  const payload = path.join(mount, 'Volterra');
+  await fs.mkdir(path.join(payload, 'app/nested'), { recursive: true });
+  await fs.mkdir(path.join(mount, 'Windows'), { recursive: true });
+  await fs.writeFile(path.join(payload, 'app/nested/obsolete.mjs'), 'Obsolete nested source');
+  await fs.writeFile(path.join(payload, 'app/fixture.mjs'), 'Stale source');
+  await fs.writeFile(path.join(payload, 'README.md'), 'Obsolete root source');
+  await fs.writeFile(path.join(payload, 'PROJECT_BRIEF.md'), 'Stale root source');
+  await fs.writeFile(path.join(mount, 'Windows/Volterra-Startup.cmd'), 'Stale shell startup command');
+  const readDirectory = fs.readdir.bind(fs);
+  let misleadingFiles = 0, misleadingDirectories = 0;
+  t.mock.method(fs, 'readdir', async (folder, options) => {
+    const entries = await readDirectory(folder, options);
+    const relative = path.relative(payload, folder);
+    if (!options?.withFileTypes || relative.startsWith('..') || path.isAbsolute(relative)) return entries;
+    return entries.map(item => {
+      if (item.isFile()) misleadingFiles++;
+      if (item.isDirectory()) misleadingDirectories++;
+      return { name: item.name, isFile: () => false, isDirectory: () => false, isSymbolicLink: () => true };
+    });
+  });
+  assert.equal((await f.copy(receipt.receiptFile, mount)).commit, receipt.commit);
+  assert.ok(misleadingFiles >= 4 && misleadingDirectories >= 2, 'The fixture must exercise both source file levels and directory traversal.');
+  await assert.rejects(fs.access(path.join(payload, 'app/nested/obsolete.mjs')));
+  await assert.rejects(fs.access(path.join(payload, 'README.md')));
+  for (const file of ['app/fixture.mjs', 'PROJECT_BRIEF.md']) assert.deepEqual(await fs.readFile(path.join(payload, file)), await fs.readFile(path.join(receipt.source, file)));
+  assert.deepEqual(await fs.readFile(path.join(mount, 'Windows/Volterra-Startup.cmd')), await fs.readFile(path.join(receipt.source, 'image/Volterra-Startup.cmd')));
+});
+
+test('copying rejects redirected realpaths within the mount and hardlinks introduced before atomic replacement', async t => {
+  const f = await fixture(t), receipt = await f.prepare(), mount = path.join(f.directory, 'build/development-900/final-install');
+  const target = path.join(mount, 'Volterra/app/fixture.mjs'), redirected = path.join(mount, 'Volterra/private/redirected.mjs');
+  await fs.mkdir(path.dirname(target), { recursive: true }); await fs.mkdir(path.dirname(redirected), { recursive: true });
+  await fs.writeFile(target, 'Original destination'); await fs.writeFile(redirected, 'Other owned private file');
+  const realpath = fs.realpath.bind(fs);
+  t.mock.method(fs, 'realpath', file => path.resolve(file) === target ? Promise.resolve(redirected) : realpath(file));
+  await assert.rejects(f.copy(receipt.receiptFile, mount), /Linked image source files/);
+  assert.equal(await fs.readFile(target, 'utf8'), 'Original destination');
+  assert.equal(await fs.readFile(redirected, 'utf8'), 'Other owned private file');
+  t.mock.restoreAll();
+  const outside = path.join(f.directory, 'outside.mjs'); await fs.writeFile(outside, 'Protected external content');
+  const writeFile = fs.writeFile.bind(fs);
+  let introduced = false;
+  t.mock.method(fs, 'writeFile', async (file, bytes, options) => {
+    const result = await writeFile(file, bytes, options);
+    if (!introduced && path.dirname(file) === path.dirname(target) && path.basename(file).startsWith('.volterra-')) {
+      introduced = true;
+      await fs.unlink(target); await fs.link(outside, target);
+    }
+    return result;
+  });
+  await assert.rejects(f.copy(receipt.receiptFile, mount), /destination is linked/);
+  assert.equal(introduced, true);
+  assert.equal(await fs.readFile(outside, 'utf8'), 'Protected external content');
+  assert.deepEqual(await fs.readdir(path.dirname(target)), ['fixture.mjs']);
 });
 
 test('payload copying rejects host destinations and junctions before writing outside the offline mount', async t => {
@@ -135,4 +195,14 @@ test('payload copying rejects host destinations and junctions before writing out
   await fs.link(linkedFile, path.join(linkedMount, 'Volterra/app/fixture.mjs'));
   await assert.rejects(f.copy(receipt.receiptFile, linkedMount), /destination is linked/);
   assert.equal(await fs.readFile(linkedFile, 'utf8'), 'Outside hard link fixture');
+  const nestedMount = path.join(f.directory, 'build/development-904/final-install'); await fs.mkdir(path.join(nestedMount, 'Volterra/app'), { recursive: true });
+  await fs.symlink(outside, path.join(nestedMount, 'Volterra/app/linked'), process.platform === 'win32' ? 'junction' : 'dir');
+  const readDirectory = fs.readdir.bind(fs);
+  t.mock.method(fs, 'readdir', async (folder, options) => {
+    const entries = await readDirectory(folder, options);
+    return options?.withFileTypes ? entries.map(item => ({ name: item.name, isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false })) : entries;
+  });
+  await assert.rejects(f.copy(receipt.receiptFile, nestedMount), /Linked image source files/);
+  assert.equal(await fs.readFile(linkedFile, 'utf8'), 'Outside hard link fixture');
+  assert.deepEqual(await fs.readdir(outside), ['original.mjs']);
 });
