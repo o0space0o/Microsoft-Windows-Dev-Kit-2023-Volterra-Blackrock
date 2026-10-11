@@ -15,7 +15,7 @@ const evidence = (patch = {}) => ({ version: 1, kind: 'services', status: 'passe
     { name: 'Zulu', displayName: 'Literal [match] fixture', status: 'Stopped', startType: 'Disabled' },
     { name: 'Alpha', displayName: 'Example service', status: 'Running', startType: 'Automatic' },
     { name: 'Beta', displayName: 'Pending service', status: 'StartPending', startType: 'Manual' }
-  ], ...patch });
+  ], error: null, ...patch });
 
 class FakeCodex extends EventEmitter {
   calls = [];
@@ -87,6 +87,66 @@ test('conversation output is bounded while the authenticated result retains all 
   assert.ok(report.length < 30_000);
 });
 
+test('sparse service inventories fail closed instead of inflating totals without state counts', async () => {
+  const mixed = Array(3); mixed[1] = evidence().services[0];
+  for (const services of [Array(2), mixed, [evidence().services[0], undefined], [null]]) {
+    const result = await inspectServices('', async () => evidence({ services }));
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.services, []); assert.equal(result.totalCount, undefined);
+    assert.equal(result.counts, undefined); assert.match(serviceReport(result), /blocked/);
+  }
+  const empty = await inspectServices('', async () => evidence({ services: [] }));
+  assert.equal(empty.status, 'passed'); assert.equal(empty.totalCount, 0);
+  assert.equal(Object.values(empty.counts).reduce((total, value) => total + value, 0), 0);
+  const valid = await inspectServices('', async () => evidence());
+  assert.equal(Object.values(valid.counts).reduce((total, value) => total + value, 0), valid.totalCount);
+});
+
+test('service status must agree with explicit success or complete blocked evidence', async () => {
+  for (const error of [undefined, false, {}, { stage: 'Service enumeration', message: 'Read failed' }]) {
+    const result = await inspectServices('', async () => evidence({ error }));
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.services, []);
+    assert.match(result.error.message, /conflicting failure evidence/);
+  }
+  const blocked = { status: 'blocked', services: [], error: { stage: 'Service enumeration', message: 'Access denied' } };
+  const malformed = [evidence({ ...blocked, services: evidence().services }),
+    ...[null, {}, { stage: '', message: 'Denied' }, { stage: 'Read', message: ' ' }, { stage: 1, message: 'Denied' }, { stage: 'Read', message: {} }]
+      .map(error => evidence({ ...blocked, error }))];
+  for (const raw of malformed) {
+    const result = await inspectServices('', async () => raw);
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.services, []); assert.equal(result.totalCount, undefined);
+    assert.match(result.error.message, /ambiguous failure evidence/);
+  }
+  const result = await inspectServices('sk-fixture-secret', async () => evidence(blocked));
+  assert.equal(result.error.stage, 'Service enumeration'); assert.equal(result.error.message, 'Access denied');
+  assert.doesNotMatch(JSON.stringify(result), /fixture-secret/);
+});
+
+test('null and non-Error collector failures yield safe blocked diagnostics rather than rejecting the query', async () => {
+  for (const failure of [null, undefined, '', 'Access denied', 123, {}]) {
+    const result = await inspectServices('', async () => { throw failure; });
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.services, []);
+    assert.equal(result.error.stage, 'Service inventory'); assert.match(serviceReport(result), /service query did not succeed/);
+  }
+  const denied = await inspectServices('', async () => { throw { message: 'Read denied. Bearer fixture-secret' }; });
+  assert.match(denied.error.message, /Read denied/); assert.doesNotMatch(denied.error.message, /fixture-secret/);
+});
+
+test('bounded service identities and metadata cannot become truncated or redacted duplicate names', async () => {
+  const row = evidence().services[0];
+  for (const name of ['', ' ', 'bad\nname', 'bad\u0000name', 'bad/name', 'bad\\name', 'x'.repeat(257)]) {
+    const result = await inspectServices('', async () => evidence({ services: [{ ...row, name }] }));
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.services, []);
+  }
+  for (const raw of [evidence({ services: [{ ...row, displayName: 'x'.repeat(257) }] }),
+    evidence({ system: { ...evidence().system, build: 'x'.repeat(129) } }), evidence({ observedAt: 'x'.repeat(41) }),
+    evidence({ services: [{ ...row, name: 'sk-fixture-one' }, { ...row, name: 'sk-fixture-two' }] })]) {
+    const result = await inspectServices('', async () => raw);
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.services, []);
+  }
+  const valid = await inspectServices('', async () => evidence({ services: [{ ...row, name: 'x'.repeat(256), displayName: 'y'.repeat(256) }] }));
+  assert.equal(valid.status, 'passed'); assert.equal(valid.services[0].name.length, 256); assert.equal(valid.services[0].displayName.length, 256);
+});
+
 test('the chat endpoint requires session authorization, needs no sign-in for a local read and persists its output', async () => {
   const fake = new FakeCodex(); let calls = 0;
   let app = await createApplication({ port: 0, codex: fake, autostart: false, serviceCollector: async () => { calls++; return evidence(); } });
@@ -137,6 +197,27 @@ test('a denied collector leaves a saved blocked report and clears transient chec
     assert.equal(result.status, 'blocked'); assert.deepEqual(result.services, []);
     assert.equal(app.snapshot().systemTool, null);
     assert.ok(app.snapshot().journal.some(entry => entry.type === 'output' && entry.data.delta?.includes('blocked. Service inventory: Script execution is disabled by policy.')));
+  } finally { await app.close(); }
+});
+
+test('collector anomalies retain a saved blocked conversation entry and recover for the next valid read', async () => {
+  let read = 0;
+  const app = await createApplication({ port: 0, codex: new FakeCodex(), autostart: false, serviceCollector: async () => {
+    if (++read === 1) throw null;
+    if (read === 2) return evidence({ services: Array(2) });
+    if (read === 3) return evidence({ error: { stage: 'Service enumeration', message: 'Read failed' } });
+    return evidence();
+  } });
+  try {
+    const blockedOutputs = () => app.snapshot().journal.filter(entry => entry.type === 'output' && entry.data.delta?.startsWith('Service inventory is blocked.')).length;
+    const before = blockedOutputs();
+    for (let index = 0; index < 3; index++) {
+      const result = await app.actions['agent/send']({ text: 'show services' });
+      assert.equal(result.status, 'blocked'); assert.equal(app.snapshot().systemTool, null);
+    }
+    assert.equal(blockedOutputs() - before, 3);
+    const result = await app.actions['agent/send']({ text: 'show services' });
+    assert.equal(result.status, 'passed'); assert.equal(result.totalCount, 3); assert.equal(app.snapshot().systemTool, null);
   } finally { await app.close(); }
 });
 
