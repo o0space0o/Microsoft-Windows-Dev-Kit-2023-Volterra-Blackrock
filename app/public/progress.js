@@ -12,6 +12,7 @@ export function describeProgress(state, connected = true) {
   if (state.systemTool?.kind === 'processes') return { phase: 'checking', title: 'Reading Windows processes', detail: 'Collecting local process IDs, names and available memory readings.', active: true };
   if (state.systemTool?.kind === 'dns') return { phase: 'checking', title: 'Reading DNS resolver settings', detail: 'Collecting configured servers for the helper’s Node resolver.', active: true };
   if (state.systemTool?.kind === 'memory') return { phase: 'checking', title: 'Reading system memory', detail: 'Collecting total and free memory readings for this OS session.', active: true };
+  if (state.systemTool?.kind === 'uptime') return { phase: 'checking', title: 'Reading OS and helper uptime', detail: 'Collecting uptime counters for this OS and the current helper process.', active: true };
   const phase = state.automation?.phase;
   if (state.activeTurn && ['paused', 'blocked', 'restart-pending'].includes(phase)) return { phase: 'replying', title: 'Codex is replying', detail: 'The automatic job is saved while Codex answers your message.', active: true };
   if (phase === 'paused' || state.paused) return { phase: 'paused', title: 'Codex is paused', detail: 'Saved work is retained. Say “continue” whenever you want it to resume.', active: false };
