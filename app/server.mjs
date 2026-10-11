@@ -22,9 +22,10 @@ import { memoryQuery, collectMemory, inspectMemory, memoryReport } from './memor
 import { uptimeQuery, collectUptime, inspectUptime, uptimeReport } from './uptime-tools.mjs';
 import { driveQuery, collectDrives, inspectDrives, driveReport } from './drive-tools.mjs';
 import { processorQuery, collectProcessors, inspectProcessors, processorReport } from './processor-tools.mjs';
+import { resolutionQuery, collectResolution, inspectResolution, resolutionReport } from './dns-resolution-tools.mjs';
 import { githubBrowserCommand } from '../scripts/Open-Browser.mjs';
 
-export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices, storageCollector = collectStorage, networkCollector = collectNetworking, browserOpener = openBrowser, fileCollector = collectFiles, logCollector = collectLogs, maintenanceCollector = collectMaintenance, processCollector = collectProcesses, dnsCollector = collectDns, memoryCollector = collectMemory, uptimeCollector = collectUptime, driveCollector = collectDrives, processorCollector = collectProcessors } = {}) {
+export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices, storageCollector = collectStorage, networkCollector = collectNetworking, browserOpener = openBrowser, fileCollector = collectFiles, logCollector = collectLogs, maintenanceCollector = collectMaintenance, processCollector = collectProcesses, dnsCollector = collectDns, memoryCollector = collectMemory, uptimeCollector = collectUptime, driveCollector = collectDrives, processorCollector = collectProcessors, resolutionCollector = collectResolution } = {}) {
   const state = await readState();
   const defaultFolder = await fs.realpath(process.env.VOLTERRA_OS_ROOT || root);
   if (!state.selected || (process.env.VOLTERRA_OS_ROOT && state.selected !== defaultFolder)) {
@@ -56,6 +57,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     { kind: 'maintenance', query: maintenanceQuery, inspect: () => inspectMaintenance(maintenanceCollector), report: maintenanceReport, script: 'Get-MaintenanceStatus.ps1' },
     { kind: 'processes', query: processQuery, inspect: query => inspectProcesses(query.filter, processCollector), report: processReport, script: 'Get-ProcessInventory.ps1' },
     { kind: 'dns', query: dnsQuery, inspect: query => inspectDns(query.filter, dnsCollector), report: dnsReport, notice: 'Reading DNS server configuration for the helper’s Node resolver.' },
+    { kind: 'dns-resolution', query: resolutionQuery, inspect: query => inspectResolution(query.name, resolutionCollector), report: resolutionReport, notice: 'Sending bounded A and AAAA queries for the requested DNS name through a dedicated Node resolver.' },
     { kind: 'memory', query: memoryQuery, inspect: () => inspectMemory(memoryCollector), report: memoryReport, notice: 'Reading total and free system memory for this OS session.' },
     { kind: 'uptime', query: uptimeQuery, inspect: () => inspectUptime(uptimeCollector), report: uptimeReport, notice: 'Reading OS and helper process uptime.' },
     { kind: 'processors', query: processorQuery, inspect: query => inspectProcessors(query.filter, processorCollector), report: processorReport, notice: 'Reading logical processor models and cumulative CPU time counters.' }

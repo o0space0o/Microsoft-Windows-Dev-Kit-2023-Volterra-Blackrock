@@ -12,6 +12,7 @@ export function describeProgress(state, connected = true) {
   if (state.systemTool?.kind === 'maintenance') return { phase: 'checking', title: 'Reading maintenance restart requirements', detail: 'Checking local Windows Update and pending file-operation signals.', active: true };
   if (state.systemTool?.kind === 'processes') return { phase: 'checking', title: 'Reading Windows processes', detail: 'Collecting local process IDs, names and available memory readings.', active: true };
   if (state.systemTool?.kind === 'dns') return { phase: 'checking', title: 'Reading DNS resolver settings', detail: 'Collecting configured servers for the helper’s Node resolver.', active: true };
+  if (state.systemTool?.kind === 'dns-resolution') return { phase: 'checking', title: 'Querying DNS addresses', detail: 'Querying A and AAAA records through the helper’s Node resolver.', active: true };
   if (state.systemTool?.kind === 'memory') return { phase: 'checking', title: 'Reading system memory', detail: 'Collecting total and free memory readings for this OS session.', active: true };
   if (state.systemTool?.kind === 'uptime') return { phase: 'checking', title: 'Reading OS and helper uptime', detail: 'Collecting uptime counters for this OS and the current helper process.', active: true };
   if (state.systemTool?.kind === 'processors') return { phase: 'checking', title: 'Reading logical processors', detail: 'Collecting reported models, speeds and cumulative CPU time counters.', active: true };
