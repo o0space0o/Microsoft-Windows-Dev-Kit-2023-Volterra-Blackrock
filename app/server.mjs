@@ -10,8 +10,9 @@ import { root, executable, run, powershell, openBrowser, chooseFolder, redact } 
 import { readState, saveState, projectPath, readCredential, stateDirectory } from './storage.mjs';
 import { Automation, outcomeSchema, readAutomationConfig } from './automation.mjs';
 import { serviceQuery, collectServices, inspectServices, serviceReport } from './service-tools.mjs';
+import { deviceQuery, collectDevices, inspectDevices, deviceReport } from './device-tools.mjs';
 
-export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices } = {}) {
+export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices } = {}) {
   const state = await readState();
   const defaultFolder = await fs.realpath(process.env.VOLTERRA_OS_ROOT || root);
   if (!state.selected || (process.env.VOLTERRA_OS_ROOT && state.selected !== defaultFolder)) {
@@ -167,16 +168,19 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     'project/resume': async () => { const project = await ensureThread(); return { project }; },
     'agent/send': async body => {
       if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 100_000) throw new Error('Enter a message of up to 100,000 characters.');
-      const query = serviceQuery(body.text);
+      const service = serviceQuery(body.text), device = service ? null : deviceQuery(body.text);
+      const query = service || device;
       if (query) {
-        if (systemTool) throw new Error('Service inventory is already running.');
+        if (systemTool) throw new Error('A system inventory is already running.');
+        const kind = service ? 'services' : 'devices';
+        const script = service ? 'Get-ServiceInventory.ps1' : 'Get-DeviceInventory.ps1';
         event('user', body.text);
-        systemTool = { kind: 'services', since: new Date().toISOString() }; publish();
-        event('command', { command: powershell ? `${powershell} -NoProfile -NonInteractive -File "${path.join(root, 'scripts', 'Get-ServiceInventory.ps1')}"` : 'Windows service collector unavailable on this platform', cwd: root });
+        systemTool = { kind, since: new Date().toISOString() }; publish();
+        event('command', { command: powershell ? `${powershell} -NoProfile -NonInteractive -File "${path.join(root, 'scripts', script)}"` : `Windows ${kind} collector unavailable on this platform`, cwd: root });
         try {
-          const result = await inspectServices(query.filter, serviceCollector);
-          event('output', { itemId: `services-${randomBytes(8).toString('hex')}`, delta: serviceReport(result) });
-          return { tool: 'services', ...result };
+          const result = service ? await inspectServices(query.filter, serviceCollector) : await inspectDevices(query.filter, deviceCollector);
+          event('output', { itemId: `${kind}-${randomBytes(8).toString('hex')}`, delta: service ? serviceReport(result) : deviceReport(result) });
+          return { tool: kind, ...result };
         } finally { systemTool = null; publish(); }
       }
       const project = await ensureThread();
