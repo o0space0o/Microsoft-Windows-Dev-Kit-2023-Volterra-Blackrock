@@ -4,6 +4,7 @@ export function describeProgress(state, connected = true) {
   if (state.approvals?.length) return { phase: 'question', title: 'Codex needs your answer', detail: 'Reply in the chat below. Your work is saved while Codex waits.', active: false };
   if (state.systemTool?.kind === 'services') return { phase: 'checking', title: 'Reading Windows services', detail: 'Collecting live service status and startup modes for this OS session.', active: true };
   if (state.systemTool?.kind === 'devices') return { phase: 'checking', title: 'Reading Windows devices', detail: 'Collecting reported device status and problem codes for this OS session.', active: true };
+  if (state.systemTool?.kind === 'storage') return { phase: 'checking', title: 'Reading workspace storage', detail: 'Collecting live filesystem capacity for the selected workspace.', active: true };
   const phase = state.automation?.phase;
   if (state.activeTurn && ['paused', 'blocked', 'restart-pending'].includes(phase)) return { phase: 'replying', title: 'Codex is replying', detail: 'The automatic job is saved while Codex answers your message.', active: true };
   if (phase === 'paused' || state.paused) return { phase: 'paused', title: 'Codex is paused', detail: 'Saved work is retained. Say “continue” whenever you want it to resume.', active: false };

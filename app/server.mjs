@@ -11,8 +11,9 @@ import { readState, saveState, projectPath, readCredential, stateDirectory } fro
 import { Automation, outcomeSchema, readAutomationConfig } from './automation.mjs';
 import { serviceQuery, collectServices, inspectServices, serviceReport } from './service-tools.mjs';
 import { deviceQuery, collectDevices, inspectDevices, deviceReport } from './device-tools.mjs';
+import { storageQuery, collectStorage, inspectStorage, storageReport } from './storage-tools.mjs';
 
-export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices } = {}) {
+export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices, storageCollector = collectStorage } = {}) {
   const state = await readState();
   const defaultFolder = await fs.realpath(process.env.VOLTERRA_OS_ROOT || root);
   if (!state.selected || (process.env.VOLTERRA_OS_ROOT && state.selected !== defaultFolder)) {
@@ -169,17 +170,22 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     'agent/send': async body => {
       if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 100_000) throw new Error('Enter a message of up to 100,000 characters.');
       const service = serviceQuery(body.text), device = service ? null : deviceQuery(body.text);
-      const query = service || device;
+      const storage = service || device ? null : storageQuery(body.text);
+      const query = service || device || storage;
       if (query) {
         if (systemTool) throw new Error('A system inventory is already running.');
-        const kind = service ? 'services' : 'devices';
-        const script = service ? 'Get-ServiceInventory.ps1' : 'Get-DeviceInventory.ps1';
+        const kind = service ? 'services' : device ? 'devices' : 'storage';
         event('user', body.text);
         systemTool = { kind, since: new Date().toISOString() }; publish();
-        event('command', { command: powershell ? `${powershell} -NoProfile -NonInteractive -File "${path.join(root, 'scripts', script)}"` : `Windows ${kind} collector unavailable on this platform`, cwd: root });
+        if (storage) event('notice', 'Reading filesystem capacity for the selected workspace.');
+        else {
+          const script = service ? 'Get-ServiceInventory.ps1' : 'Get-DeviceInventory.ps1';
+          event('command', { command: powershell ? `${powershell} -NoProfile -NonInteractive -File "${path.join(root, 'scripts', script)}"` : `Windows ${kind} collector unavailable on this platform`, cwd: root });
+        }
         try {
-          const result = service ? await inspectServices(query.filter, serviceCollector) : await inspectDevices(query.filter, deviceCollector);
-          event('output', { itemId: `${kind}-${randomBytes(8).toString('hex')}`, delta: service ? serviceReport(result) : deviceReport(result) });
+          const result = service ? await inspectServices(query.filter, serviceCollector) : device ? await inspectDevices(query.filter, deviceCollector)
+            : await inspectStorage(selected()?.path || defaultFolder, storageCollector);
+          event('output', { itemId: `${kind}-${randomBytes(8).toString('hex')}`, delta: service ? serviceReport(result) : device ? deviceReport(result) : storageReport(result) });
           return { tool: kind, ...result };
         } finally { systemTool = null; publish(); }
       }
