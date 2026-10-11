@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const top = new Set(['AGENTS.md', 'PROJECT_BRIEF.md', 'README.md', 'package.json', 'automation.json', '.gitignore']);
-const allowed = file => typeof file === 'string' && !file.includes('\\') && !file.includes(':') && !file.startsWith('/') && !file.split('/').some(p => !p || p === '.' || p === '..') && (top.has(file) || /^(app|scripts|test|image|design)\/[\w./-]+\.(mjs|js|json|ps1|cmd|html|css|md|txt|png)$/.test(file)) && !/(^|\/)(private|build|node_modules|\.git)(\/|$)/.test(file);
+const allowed = file => typeof file === 'string' && !file.includes('\\') && !file.includes(':') && !file.startsWith('/') && !file.split('/').some(p => !p || p === '.' || p === '..') && (top.has(file) || file === 'scripts/Probe-WindowsFacts.cs' || /^(app|scripts|test|image|design)\/[\w./-]+\.(mjs|js|json|ps1|cmd|html|css|md|txt|png)$/.test(file)) && !/(^|\/)(private|build|node_modules|\.git)(\/|$)/.test(file);
 async function atomic(file, value) { const temp = `${file}.${randomUUID()}.tmp`; await fs.writeFile(temp, JSON.stringify(value, null, 2), { flag: 'wx' }); await fs.rename(temp, file); }
 async function content(file) { try { return await fs.readFile(file); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } }
 async function checkedPath(base, file) {

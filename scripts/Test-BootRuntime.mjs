@@ -7,6 +7,7 @@ import { CodexBridge } from '../app/codex.mjs';
 import { redact } from '../app/platform.mjs';
 import { atomic } from '../app/storage.mjs';
 import { waitForHelperRuntime, probeCodexRuntime, probePersistentHistory, evaluateBootRuntime, inspectBrowserCapture } from '../app/runtime-verification.mjs';
+import { readWindowsFacts } from '../app/windows-facts.mjs';
 
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -59,7 +60,7 @@ export async function verifyBootRuntime({ port = 43123, execute = runProbe } = {
   const observe = async timeoutMs => {
     const observed = await waitForHelperRuntime(`http://127.0.0.1:${port}`, { timeoutMs });
     for (const key of ['automaticWorkspace', 'serverReady', 'helperRuntimeReady', 'helperRuntimeRunning', 'helperChatgptAccountObserved']) result[key] = observed[key];
-    result.historyContext = { directory: stateRoot, codexHome: process.env.CODEX_HOME, sourceRoot, osRoot: result.systemRoot, project: observed.project };
+    result.historyContext = { directory: stateRoot, codexHome: process.env.CODEX_HOME, sourceRoot, osRoot: result.systemRoot, bootId: result.bootId, project: observed.project };
     if (observed.error) result.errors.push(observed.error);
     return observed;
   };
@@ -102,8 +103,16 @@ export async function verifyBootRuntime({ port = 43123, execute = runProbe } = {
       // This separate, credential-free process proves engine execution and
       // rendering. It does not prove the visible sign-in browser's image path.
       result.browser.imagePathObserved = false;
-      result.errors.push('The visible browser image path has not been observed through a native process query.');
     } catch (error) { result.errors.push(redact(error.message)); }
+    try {
+      result.windowsFacts = await readWindowsFacts({ root: sourceRoot, execute, guard: regularPath, browserPid: process.env.VOLTERRA_BROWSER_PID, browserStartedUtc: process.env.VOLTERRA_BROWSER_STARTED_UTC });
+      result.bootIdentityObserved = result.windowsFacts.bootIdentityObserved;
+      if (result.bootIdentityObserved) result.bootId = result.windowsFacts.bootId;
+      result.browser.executableMatched = result.windowsFacts.browserImageObserved;
+      result.browser.imagePathObserved = result.windowsFacts.browserImageObserved;
+      for (const error of result.windowsFacts.errors) result.errors.push(redact(`${error.stage}: ${error.message}`));
+    } catch (error) { result.errors.push(redact(error.message)); }
+    if (!result.browser.executableMatched) result.errors.push('The visible browser image path has not been observed through a native process query.');
     observed = await observe(5000); await evaluate();
     result.sourceUpdate = { status: 'unconfirmed', reason: 'Startup health has not passed.' };
     if (result.startupHealthy) {
@@ -111,7 +120,7 @@ export async function verifyBootRuntime({ port = 43123, execute = runProbe } = {
       if (confirmation.code !== 0) throw new Error('Source update health confirmation failed.');
       result.sourceUpdate = JSON.parse(confirmation.stdout);
     }
-    result.errors.push('A native boot identity has not been observed; reboot persistence is unproven.');
+    if (!result.bootIdentityObserved) result.errors.push('A native boot identity has not been observed; reboot persistence is unproven.');
   } catch (error) { result.errors.push(redact(error.message)); await evaluate().catch(() => { result.status = 'blocked'; }); }
   finally { await save(); }
   return result;

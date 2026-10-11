@@ -144,6 +144,8 @@ export async function launch(options) {
   const git = await ownedPath(path.join(tools, 'git', 'cmd', 'git.exe'));
   const chrome = options.noBrowser ? null : await ownedPath(path.join(tools, 'chrome', 'chrome.exe'));
   const env = { ...process.env, VOLTERRA_CODEX_PATH: codex, VOLTERRA_GH_PATH: gh, VOLTERRA_GIT_PATH: git, VOLTERRA_PORT: String(options.port), PATH: `${path.dirname(git)};${tools};${process.env.PATH || ''}` };
+  delete env.VOLTERRA_BROWSER_PID;
+  delete env.VOLTERRA_BROWSER_STARTED_UTC;
   let boot;
   if (options.boot) {
     if (!/^[A-Z]:$/i.test(env.SystemDrive || '') || !env.SystemRoot) throw new Error('The boot environment has no valid Windows system drive.');
@@ -177,8 +179,12 @@ export async function launch(options) {
     await waitForListening(options.port, () => stopped);
     if (boot) await writeLaunchEvidence(boot.stateDirectory, { stage: 'Listening', edition: 'WinVOS', ...boot, stateWritable: true, stateSurvivedRestart: false, helperPid: child.pid, helperListening: true, sourceHealthConfirmed: false });
     if (chrome) {
+      env.VOLTERRA_BROWSER_STARTED_UTC = new Date().toISOString();
       const browser = spawn(chrome, ['--no-first-run', '--start-fullscreen', `--user-data-dir=${env.VOLTERRA_BROWSER_PROFILE}`, `--app=http://127.0.0.1:${options.port}/?screen=connections`], { cwd: root, env, windowsHide: false, stdio: 'ignore' });
-      browser.once('error', () => console.error('The browser could not start. Runtime acceptance remains pending.'));
+      await new Promise(resolve => {
+        browser.once('spawn', () => { if (Number.isSafeInteger(browser.pid) && browser.pid > 0) env.VOLTERRA_BROWSER_PID = String(browser.pid); resolve(); });
+        browser.once('error', () => { console.error('The browser could not start. Runtime acceptance remains pending.'); resolve(); });
+      });
       browser.unref();
     }
     if (boot) {
