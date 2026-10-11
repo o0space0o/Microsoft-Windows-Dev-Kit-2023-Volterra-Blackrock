@@ -4,6 +4,8 @@ The user requires the approved space-themed interface to be reproduced without a
 
 Use sentence case in all interface labels and explanatory copy, preserving proper names and technical abbreviations. Keep the approved custom control treatment and organized system tools. Avoid conventional list and table views.
 
+The live Codex workspace is a log and chat, with clear live running, reviewing, checking, waiting and stopped states. The user wants automatic work without a setup or operation control panel. Show questions in the conversation and accept answers through its composer. Keep pause/resume available as chat instructions; never silently grant security-sensitive permissions. Preserve the four approved reference images while updating this live prototype.
+
 The user prefers browser sign-in and no OpenAI API key. Follow the official local open-source Sign in with ChatGPT flow and the integration plan in design/integration-plan.json. Use an actual system browser for official authorization. Keep GitHub authorization separate from ChatGPT authorization. Never store credentials in the repository, approved assets or distributable OS image.
 
 Design mockups are illustrative. Do not claim an implemented sign-in, running agent, tested driver, bootable image or successful update without direct verification. Test each application/runtime against the composed Validation OS API surface and test required hardware on the actual Windows Dev Kit 2023.
