@@ -98,6 +98,40 @@ test('partial failures preserve a positive restart reason and never turn unknown
   assert.equal(result.status, 'blocked'); assert.equal(result.restartRequired, null); assert.deepEqual(result.reasons, []);
 });
 
+test('missing maintenance provider rows remain unknown instead of passing as negative restart evidence', async () => {
+  const missingFirst = Array(2); missingFirst[1] = check('pending-file-operations');
+  const missingSecond = Array(2); missingSecond[0] = check('windows-update', true);
+  const blockedWithHole = Array(2); blockedWithHole[0] = denied('windows-update');
+  for (const checks of [Array(2), missingFirst, missingSecond, blockedWithHole,
+    [undefined, check('pending-file-operations')], [check('windows-update'), null]]) {
+    for (const status of ['passed', 'blocked']) {
+      const result = await inspectMaintenance(async () => evidence({ status, checks }));
+      assert.equal(result.status, 'blocked'); assert.equal(result.restartRequired, null);
+      assert.deepEqual(result.reasons, []); assert.deepEqual(result.checks, []);
+      const report = maintenanceReport(result);
+      assert.match(report, /blocked.*incomplete provider readings/);
+      assert.doesNotMatch(report, /Neither queried provider reports|No restart reported/);
+    }
+  }
+});
+
+test('complete provider pairs retain true, false and unknown restart evidence in either order', async () => {
+  const states = [false, true, null];
+  const reading = (id, state) => state === null ? denied(id) : check(id, state);
+  for (const update of states) for (const files of states) for (const reverse of [false, true]) {
+    const checks = [reading('windows-update', update), reading('pending-file-operations', files)];
+    if (reverse) checks.reverse();
+    const status = update === null || files === null ? 'blocked' : 'passed';
+    const result = await inspectMaintenance(async () => evidence({ status, checks }));
+    const expected = update === true || files === true ? true : status === 'passed' ? false : null;
+    assert.equal(result.status, status); assert.equal(result.restartRequired, expected);
+    assert.deepEqual(result.checks.map(value => value.id), ['windows-update', 'pending-file-operations']);
+    assert.deepEqual(result.reasons, [update === true && 'Windows Update', files === true && 'Pending file operations'].filter(Boolean));
+    assert.match(maintenanceReport(result), expected === true ? /Restart reported by:/
+      : expected === false ? /Neither queried provider reports/ : /Restart requirements remain unknown/);
+  }
+});
+
 test('queued filenames, provider extras and caller-supplied aggregate flags are excluded from results', async () => {
   const raw = evidence({ restartRequired: true, reasons: ['Private fixture reason'], accepted: true });
   raw.checks[1].queuedPaths = ['Private fixture filename']; raw.checks[0].details = 'Private fixture details';
@@ -168,6 +202,29 @@ test('a policy-blocked maintenance read remains saved as unknown and clears tran
     const result = await app.actions['agent/send']({ text: 'show restart requirements' });
     assert.equal(result.status, 'blocked'); assert.equal(result.restartRequired, null); assert.equal(app.snapshot().systemTool, null);
     assert.ok(app.snapshot().journal.some(entry => entry.type === 'output' && entry.data.delta?.includes('Maintenance restart requirements are blocked.')));
+  } finally { await app.close(); }
+});
+
+test('missing maintenance readings save a blocked report and checking recovers for the next complete query', async () => {
+  let calls = 0;
+  const options = { port: 0, codex: new FakeCodex(), autostart: false, maintenanceCollector: async () => {
+    calls++;
+    return calls === 1 ? evidence({ checks: Array(2) }) : evidence();
+  } };
+  let app = await createApplication(options);
+  try {
+    const before = app.snapshot().journal.length;
+    const missing = await app.actions['agent/send']({ text: 'show maintenance' });
+    assert.equal(missing.status, 'blocked'); assert.equal(missing.restartRequired, null);
+    assert.equal(app.snapshot().systemTool, null);
+    const output = app.snapshot().journal.slice(before).find(entry => entry.type === 'output'
+      && entry.data.delta?.includes('Maintenance restart requirements are blocked.'));
+    assert.ok(output); assert.doesNotMatch(output.data.delta, /Neither queried provider reports/);
+    await app.close(); app = await createApplication({ ...options, codex: new FakeCodex() });
+    assert.ok(app.snapshot().journal.some(entry => entry.data?.itemId === output.data.itemId));
+    const complete = await app.actions['agent/send']({ text: 'show maintenance' });
+    assert.equal(complete.status, 'passed'); assert.equal(complete.restartRequired, false);
+    assert.equal(calls, 2); assert.equal(app.snapshot().systemTool, null);
   } finally { await app.close(); }
 });
 

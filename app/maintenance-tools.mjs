@@ -28,7 +28,8 @@ export async function inspectMaintenance(collect = collectMaintenance) {
     const environment = system.edition === 'WinVOS' ? 'Validation OS session; VM or physical identity unverified'
       : system.edition === 'Unknown' ? 'Windows session; OS edition unverified' : 'Windows session; VM or physical identity unverified';
     const identities = new Set();
-    const checks = raw.checks.map(check => {
+    // Visit every provider slot; absent rows must not become negative restart evidence.
+    const checks = Array.from(raw.checks, check => {
       if (typeof check?.id !== 'string' || !Object.hasOwn(providers, check.id) || identities.has(check.id) || !['passed', 'blocked'].includes(check.status)) throw new Error('The maintenance collector returned incomplete provider readings.');
       identities.add(check.id);
       if (check.status === 'blocked') {
