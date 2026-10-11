@@ -21,7 +21,7 @@ export function run(executable, args, options = {}) {
 export function executable(name) {
   const configured = process.env[`VOLTERRA_${name.toUpperCase()}_PATH`];
   if (configured && existsSync(configured)) return configured;
-  const portable = path.join(root, 'private', 'tools', name === 'node' ? 'node.exe' : `${name}.exe`);
+  const portable = path.join(root, 'private', 'tools', name === 'git' ? 'git/cmd/git.exe' : name === 'node' ? 'node.exe' : `${name}.exe`);
   return existsSync(portable) ? portable : name;
 }
 export async function openBrowser(value) {

@@ -26,6 +26,7 @@ function render(value) {
   $('#status').textContent = `${value.running ? 'Codex ready' : 'Codex not started'} · ${value.account ? 'ChatGPT connected' : 'ChatGPT not connected'} · ${value.github?.login ? `GitHub: ${value.github.login}` : 'GitHub not connected'}\n${value.project?.path || 'No project folder selected'}\n${value.activeTurn ? 'Working · progress streams below' : value.paused ? 'Paused · history saved' : 'Ready for your message'}`;
   $('#plan').textContent = value.account ? `Using ChatGPT plan · ${value.account.source}` : 'Connect ChatGPT to begin';
   $('#restart').classList.toggle('hidden', !value.restartRequired);
+  $('#automation-status').textContent = value.automation ? `${value.automation.enabled ? 'Automatic work' : 'Automation ready'} · ${value.automation.phase}\n${value.automation.taskTitle} · GitHub main${value.automation.lastError ? '\n' + value.automation.lastError : ''}` : '';
   if (value.project && document.activeElement !== $('#folder')) $('#folder').value = value.project.path;
   $('#requests').replaceChildren();
   for (const request of value.approvals) {
@@ -77,6 +78,7 @@ function navigate(next) {
 }
 async function safe(callback) { try { const result = await callback(); if (result?.userCode) append('notice', `Enter this one-time code in the browser: ${result.userCode}`); return result; } catch (error) { panel(); append('error', error.message); } }
 const handlers = {
+  automatic: () => action('automation/resume'),
   chatgpt: () => action('chatgpt/sign-in'), native: () => action('codex/connect'), 'codex-login': () => action('codex/sign-in'), 'device-login': () => action('codex/sign-in', { device: true }), github: () => action('github/sign-in'), usage: () => action('usage/open'),
   another: () => $('#another-project').classList.toggle('hidden'), browse: () => action('project/open', { browse: true }), open: () => action('project/open', { path: $('#folder').value }), resume: () => action('project/resume'), vision: () => action('agent/vision'),
   pause: () => action('agent/interrupt', { pause: true }), interrupt: () => action('agent/interrupt'), continue: () => action('agent/send', { text: 'Continue from the saved project state and report your progress.' }), review: () => action('agent/review'),

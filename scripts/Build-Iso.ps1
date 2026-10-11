@@ -14,6 +14,9 @@ function Bcd([string[]]$Arguments) {
     return ($result -join [Environment]::NewLine)
 }
 try {
+    $finalized = Join-Path $build 'Finalize-result.json'
+    if (-not (Test-Path -LiteralPath $finalized)) { & (Join-Path $PSScriptRoot 'Finalize-ImagePayload.ps1') }
+    if ((Get-Content -LiteralPath $finalized -Raw | ConvertFrom-Json).status -ne 'passed') { throw 'Final helper payload has not been verified.' }
     $result = Get-Content -LiteralPath (Join-Path $build 'output\result.json') -Raw | ConvertFrom-Json
     $receipt = Get-Content -LiteralPath (Join-Path $build 'image-receipt.json') -Raw | ConvertFrom-Json
     if ($result.status -ne 'passed' -or $result.build -ne 'development-006') { throw 'Successful VM servicing is required.' }

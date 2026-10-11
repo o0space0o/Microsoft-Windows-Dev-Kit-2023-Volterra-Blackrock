@@ -7,9 +7,10 @@ import { fileURLToPath } from 'node:url';
 import { CodexBridge } from './codex.mjs';
 import { ChatGPTSignIn } from './auth.mjs';
 import { root, executable, run, powershell, openBrowser, chooseFolder, redact } from './platform.mjs';
-import { readState, saveState, projectPath, readCredential } from './storage.mjs';
+import { readState, saveState, projectPath, readCredential, stateDirectory } from './storage.mjs';
+import { Automation, outcomeSchema, readAutomationConfig } from './automation.mjs';
 
-export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge() } = {}) {
+export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository } = {}) {
   const state = await readState();
   const defaultFolder = await fs.realpath(process.env.VOLTERRA_OS_ROOT || root);
   if (!state.selected || (process.env.VOLTERRA_OS_ROOT && state.selected !== defaultFolder)) {
@@ -19,17 +20,25 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
   if (process.env.VOLTERRA_OS_ROOT && state.autoContinueVision === undefined) state.autoContinueVision = true;
   await saveState(state);
   const clients = new Set(), journal = [], approvals = new Map();
+  await fs.mkdir(stateDirectory, { recursive: true });
+  const journalFile = path.join(stateDirectory, 'journal.jsonl');
+  try { journal.push(...(await fs.readFile(journalFile, 'utf8')).trim().split('\n').slice(-500).filter(Boolean).map(line => JSON.parse(line))); } catch { /* A partial last line must not prevent recovery. */ }
+  let journalWrites = Promise.resolve();
   const session = randomBytes(32).toString('hex');
-  let origin, account = null, activeTurn = null, loadedThread = null, paused = false, pauseRequested = false, restartRequired = false, github = null, runtimeToken = null, runtimeStart;
+  let origin, account = null, activeTurn = null, loadedThread = null, paused = false, pauseRequested = false, restartRequired = false, github = null, runtimeToken = null, runtimeStart, automation;
+  const finalMessages = new Map();
   const selected = () => state.selected && state.projects[state.selected];
   function event(type, data) {
     const entry = JSON.parse(redact(JSON.stringify({ type, data, time: new Date().toISOString() })));
-    if (type !== 'state') { journal.push(entry); if (journal.length > 1000) journal.shift(); }
+    if (type !== 'state') {
+      journal.push(entry); if (journal.length > 1000) journal.shift();
+      journalWrites = journalWrites.catch(() => {}).then(() => fs.appendFile(journalFile, JSON.stringify(entry) + '\n'));
+    }
     const serialized = `data: ${JSON.stringify(entry)}\n\n`;
     for (const client of clients) client.write(serialized);
     if (['message', 'command', 'output', 'error', 'notice'].includes(type)) process.stdout.write(`[${type}] ${typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data)}\n`);
   }
-  const snapshot = () => ({ project: selected() || null, projects: Object.values(state.projects), authMode: state.authMode, account, github, running: !!codex.child, activeTurn, paused, restartRequired, approvals: [...approvals.values()], journal: journal.slice(-300), sourceArtwork: 'Approved reference artwork; sample labels are part of the reference', implementation: 'Development prototype' });
+  const snapshot = () => ({ project: selected() || null, projects: Object.values(state.projects), authMode: state.authMode, account, github, automation: automation?.snapshot() || null, running: !!codex.child, activeTurn, paused, restartRequired: restartRequired || automation?.saved.phase === 'restart-pending', approvals: [...approvals.values()], journal: journal.slice(-300), sourceArtwork: 'Approved reference artwork; sample labels are part of the reference', implementation: 'Development prototype' });
   const publish = () => event('state', snapshot());
   const auth = new ChatGPTSignIn(state, async () => {
     state.authMode = 'siwc'; await saveState(state);
@@ -45,6 +54,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
       const project = selected();
       if (params?.threadId && project?.threadId && params.threadId !== project.threadId) return;
       if (method === 'item/agentMessage/delta') event('message', { itemId: params.itemId, delta: params.delta });
+      else if (method === 'item/completed' && params.item?.type === 'agentMessage') finalMessages.set(params.turnId, params.item.text);
       else if (method === 'item/commandExecution/outputDelta') event('output', { itemId: params.itemId, delta: params.delta });
       else if (method === 'item/started') {
         if (params.item?.type === 'commandExecution') event('command', { command: params.item.command, cwd: params.item.cwd });
@@ -55,6 +65,9 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
         event(params.turn.status === 'failed' ? 'error' : 'notice', { status: params.turn.status, error: params.turn.error?.message || null });
         if (project) { project.lastStatus = params.turn.status; project.updatedAt = new Date().toISOString(); await saveState(state); }
         publish();
+        const result = finalMessages.get(params.turn.id) || params.turn.items?.filter(item => item.type === 'agentMessage').at(-1)?.text;
+        finalMessages.delete(params.turn.id);
+        await automation?.completed(params.turn.status, result);
       } else if (method === 'account/login/completed') {
         if (params.success) { await readManagedAccount(); state.authMode = 'codex'; await saveState(state); event('notice', 'Codex browser sign-in completed.'); await continueInitialVision(); }
         else event('error', params.error || 'Codex browser sign-in did not complete.');
@@ -69,6 +82,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     return account;
   }
   async function continueInitialVision() {
+    if (automation?.saved.enabled) { await automation.resume(); return; }
     if (!state.autoContinueVision || activeTurn || !account) return;
     await actions['agent/vision']();
     state.autoContinueVision = false; await saveState(state);
@@ -97,7 +111,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     if (loadedThread === project.threadId && loadedThread) return project;
     const options = { cwd: project.path, sandbox: 'workspace-write', approvalPolicy: 'on-request' };
     const result = project.threadId ? await codex.request('thread/resume', { ...options, threadId: project.threadId })
-      : await codex.request('thread/start', { ...options, developerInstructions: 'Work within the selected project. Read its AGENTS.md and PROJECT_BRIEF.md when present. Never modify boot entries, partitions or an OS image without an explicit user instruction for the exact operation. Never restart the host automatically. Report required restarts. Do not publish private OS binaries or credentials.' });
+      : await codex.request('thread/start', { ...options, developerInstructions: 'Read AGENTS.md and PROJECT_BRIEF.md. The user authorized autonomous development, tested source commits to main and staged helper updates. Work in the automatic OS root; original application source is under Volterra. Keep kernel/driver/boot changes in the verified offline-image and recovery workflow. Preserve Windows 11, EFI and recovery partitions. Never restart automatically. Report missing proof and required restarts. Do not publish vendor OS binaries or credentials. The host preview must not alter the current Windows installation.' });
     project.threadId = result.thread.id; loadedThread = project.threadId; await saveState(state); publish(); return project;
   }
   async function checkRestart() {
@@ -122,6 +136,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     },
     'project/open': async body => {
       if (activeTurn) throw new Error('Pause or interrupt the current job before opening another folder.');
+      await automation?.pause();
       const entered = body.browse ? await chooseFolder() : body.path;
       if (!entered) return { cancelled: true };
       if (typeof entered !== 'string' || !path.isAbsolute(entered)) throw new Error('Enter an absolute project folder path.');
@@ -147,6 +162,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
       return actions['agent/send']({ text: `Continue the authorized Microsoft Volterra implementation in this project. Inspect the current files first, preserve existing work, carry the requirements below into the project, and make verifiable progress. Do not restart this machine.\n\n${brief}` });
     },
     'agent/interrupt': async body => {
+      await automation?.pause();
       if (!activeTurn) return { status: 'No active turn' };
       pauseRequested = !!body.pause;
       const threadId = selected().threadId, turnId = activeTurn;
@@ -187,6 +203,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     'github/sign-in': async () => {
       if (github?.pending) throw new Error('GitHub browser sign-in is already pending.');
       const env = { ...process.env };
+      env.VOLTERRA_BROWSER_PROFILE = path.join(stateDirectory, 'browser');
       if (powershell) env.GH_BROWSER = `"${powershell}" -NoProfile -File "${path.join(root, 'scripts/Open-Browser.ps1')}" -Url`;
       const child = spawn(executable('gh'), ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web'], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
       github = { pending: true }; publish();
@@ -197,6 +214,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
         try { github = code === 0 ? { login: await run(executable('gh'), ['api', 'user', '--jq', '.login']) } : null; if (code !== 0) event('error', 'GitHub sign-in did not complete.'); }
         catch (error) { event('error', error.message); github = null; }
         publish();
+        if (github?.login && automation?.saved.enabled) await automation.resume();
       });
       return { status: 'Follow the GitHub browser sign-in instructions in the journal' };
     },
@@ -209,6 +227,8 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
       const result = { repository: details.full_name, url: details.html_url, defaultBranch: details.default_branch, release, installation: 'Updates are review-only until a publisher verification key and recovery path are configured.' };
       event('notice', result); return result;
     },
+    'automation/resume': async () => { await automation.resume(); return { automation: automation.snapshot() }; },
+    'automation/pause': async () => actions['agent/interrupt']({ pause: true }),
     'usage/open': async () => { await openBrowser('https://chatgpt.com/settings/usage'); return {}; },
     'restart/check': async () => { await checkRestart(); return { required: restartRequired }; }
   };
@@ -252,9 +272,32 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
   origin = `http://127.0.0.1:${server.address().port}`;
+  const config = await readAutomationConfig();
+  async function automaticTurn(text, review = false) {
+    const project = await ensureThread();
+    const result = await codex.request('turn/start', {
+      threadId: project.threadId, input: [{ type: 'text', text, text_elements: [] }], outputSchema: outcomeSchema,
+      sandboxPolicy: review ? { type: 'readOnly' } : { type: 'workspaceWrite', writableRoots: [root], networkAccess: false }
+    });
+    activeTurn = result.turn.id; paused = false; publish();
+  }
+  automation = new Automation({ config, repository, enabled: autostart, hooks: {
+    connected: () => !!account, active: () => !!activeTurn,
+    changed: publish, notice: message => event('notice', message),
+    work: async (task, saved) => automaticTurn(`Continue the saved thread. This is the authorized automatic queue for ${config.repository}, branch main.\nTask: ${task.title}\n${task.instruction}\nPrevious issue: ${saved.lastError || 'None'}\nImplement one verifiable increment. Do not commit or push yourself: the controller runs independent checks and publishes after review. Return status progress for a tested increment, complete when this task's acceptance evidence exists, or blocked with a specific prerequisite.\n\n${await fs.readFile(path.join(root, 'PROJECT_BRIEF.md'), 'utf8')}`),
+    review: outcome => automaticTurn(`Review the current source changes independently. Read the diff, inspect tests, preserve the approved reference hashes, and check for credentials or vendor binaries. Do not edit or publish. Return complete only if the increment is correct and safe to checkpoint; otherwise return blocked with actionable findings. Work summary: ${outcome.summary}`, true),
+    reviewRemote: comparison => automaticTurn(`Review GitHub main changes from ${comparison.current} to ${comparison.latest} in repository ${config.repository}. Use git -C "${root}" to inspect the fetched diff. Do not edit, checkout or publish. Return complete only if the change fits the project and contains no protected OS/credential/vendor files. The controller separately validates and tests a detached snapshot before staging it for restart. Otherwise return blocked with actionable findings.`, true)
+  } });
   const restartTimer = setInterval(checkRestart, 30_000); restartTimer.unref();
   if (state.authMode === 'siwc') { const credential = await readCredential(); if (credential) account = { type: 'chatgpt', email: credential.email, source: 'This app’s ChatGPT plan authorization' }; }
-  return { server, origin, state, actions, snapshot, close: async () => { clearInterval(restartTimer); auth.cancel(); await codex.stop(); for (const client of clients) client.end(); await new Promise(resolve => server.close(resolve)); } };
+  if (state.authMode === 'codex' || autostart) {
+    try { await ensureRuntime('codex'); if (account && !state.authMode) { state.authMode = 'codex'; await saveState(state); } }
+    catch (error) { event('error', error.message); }
+  }
+  try { github = { login: await run(executable('gh'), ['api', 'user', '--jq', '.login']) }; } catch { github = null; }
+  await automation.start(); publish();
+  if (autostart && !account) event('notice', 'Automatic work is waiting for this OS’s first browser sign-in. No project folder setup is needed.');
+  return { server, origin, state, actions, snapshot, automation, close: async () => { automation.close(); clearInterval(restartTimer); auth.cancel(); await codex.stop(); await journalWrites; for (const client of clients) client.end(); await new Promise(resolve => server.close(resolve)); } };
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { const application = await createApplication(); process.stdout.write(`Microsoft Volterra workspace: ${application.origin}\n`); for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, async () => { await application.close(); process.exit(0); }); }

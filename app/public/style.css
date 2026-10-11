@@ -8,7 +8,9 @@ body { margin: 0; overflow: hidden; width: 100vw; height: 100vh; display: flex; 
 .portal:hover { box-shadow: 0 0 22px 3px #bfaaff50; background: #e6d9ff09; }
 .portal:focus-visible { outline: 2px solid #dac5ff; outline-offset: 6px; }
 .hidden { display: none !important; }
-#workspace { position: absolute; right: 2.4%; top: 3.2%; bottom: 3.2%; width: 62%; padding: 24px; display: flex; flex-direction: column; background: linear-gradient(140deg, #101629f5, #171025f5); border: 1px solid #c9b2ff38; border-radius: 32px; box-shadow: 0 24px 90px #000a, inset 0 0 40px #baa0ff06; backdrop-filter: blur(24px); }
+#workspace { position: fixed; right: 2.4vw; top: 3.2vh; bottom: 3.2vh; width: min(1036px, 94vw); padding: 24px; display: flex; flex-direction: column; background: linear-gradient(140deg, #101629f5, #171025f5); border: 1px solid #c9b2ff38; border-radius: 32px; box-shadow: 0 24px 90px #000a, inset 0 0 40px #baa0ff06; backdrop-filter: blur(24px); }
+#work-scroll { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; padding-right: 6px; }
+.panel-heading, #status, #restart, #composer, .footnote { flex-shrink: 0; }
 .panel-heading { display: flex; align-items: center; justify-content: space-between; }
 .eyebrow, .footnote { font-size: 11px; color: #afa9c2; }
 h1 { margin: 6px 0 10px; font-size: 27px; font-weight: 500; }
@@ -38,4 +40,4 @@ textarea { resize: vertical; }
 .request { background: #b799ec10; border: 1px solid #c8adfb55; border-radius: 18px; padding: 12px; margin-bottom: 10px; }
 .request pre { white-space: pre-wrap; font-size: 11px; max-height: 90px; overflow: auto; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
-@media (max-width: 900px) { #workspace { width: 93%; padding: 14px; } #connections, #project { max-height: 135px; overflow-y: auto; } h1 { font-size: 20px; } }
+@media (max-width: 900px) { #workspace { width: 93vw; padding: 14px; } h1 { font-size: 20px; } }

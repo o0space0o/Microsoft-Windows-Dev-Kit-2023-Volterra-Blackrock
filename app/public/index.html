@@ -11,7 +11,8 @@
     <nav id="portals" aria-label="Workspace navigation"></nav>
     <aside id="workspace" class="hidden" aria-label="Live workspace">
       <div class="panel-heading"><div><span class="eyebrow">Microsoft Volterra · Development prototype</span><h1 id="panel-title">Connections</h1></div><button id="close" class="orb small" aria-label="Close live workspace">×</button></div>
-      <div id="status" role="status"></div><div id="restart" class="hidden">Restart required by Windows. Save your project before restarting.</div>
+      <div id="status" role="status"></div><div id="automation-status" role="status"></div><div id="restart" class="hidden">Restart required. Save your project before restarting.</div>
+      <div id="work-scroll">
       <div id="connections" class="section">
         <p>Continue with ChatGPT to authorize this app to use your eligible plan. Requests consume your plan usage.</p>
         <div class="actions"><button data-action="chatgpt">Continue with ChatGPT</button><button data-action="native">Use existing Codex sign-in</button><button data-action="codex-login">Sign in to Codex</button><button data-action="device-login">Use a device code</button><button data-action="github">Connect GitHub</button><button data-action="usage">Manage usage</button></div>
@@ -20,14 +21,15 @@
         <p>Your system workspace is configured automatically. Codex opens it and saves its history without folder setup.</p>
         <div class="actions"><button data-action="resume">Resume saved work</button><button data-action="vision">Continue our project vision</button><button data-action="another">Open another project</button></div>
         <div id="another-project" class="hidden"><label for="folder">Another project folder</label><div class="field-line"><input id="folder" placeholder="Absolute folder path" autocomplete="off"><button data-action="browse" class="orb" aria-label="Browse for another project">◈</button><button data-action="open">Open project</button></div></div>
-        <label for="repository">GitHub repository</label><div class="field-line"><input id="repository" placeholder="owner/repository" autocomplete="off"><button data-action="inspect">Inspect repository</button></div>
+        <label for="repository">GitHub repository</label><div class="field-line"><input id="repository" value="o0space0o/Microsoft-Windows-Dev-Kit-2023-Volterra-Blackrock" autocomplete="off"><button data-action="inspect">Inspect repository</button></div>
       </div>
-      <div class="section controls"><span id="plan"></span><div class="actions"><button data-action="pause">Pause</button><button data-action="interrupt">Interrupt</button><button data-action="continue">Continue</button><button data-action="review">Review changes</button><button data-action="editor">Open a file</button></div></div>
+      <div class="section controls"><span id="plan"></span><div class="actions"><button data-action="automatic">Continue automatically</button><button data-action="pause">Pause</button><button data-action="interrupt">Interrupt</button><button data-action="continue">Continue</button><button data-action="review">Review changes</button><button data-action="editor">Open a file</button></div></div>
       <div id="requests" aria-live="polite"></div>
       <div id="journal" role="log" aria-label="Live agent messages and terminal output" tabindex="0"></div>
       <div id="editor" class="section hidden"><label for="file-path">Project-relative text file</label><div class="field-line"><input id="file-path" placeholder="README.md"><button data-action="read">Read file</button></div><label for="file-content">File contents</label><textarea id="file-content" spellcheck="false"></textarea><div class="actions"><button data-action="save">Save file</button><button data-action="editor">Close file</button></div></div>
+      </div>
       <form id="composer"><label class="sr-only" for="message">Message to Codex</label><textarea id="message" rows="2" placeholder="Send a message while Codex works…"></textarea><button class="orb" type="submit" aria-label="Send message">↗</button></form>
-      <p class="footnote">Pause interrupts the active turn and retains its history. Continue starts a new turn. OS updates remain review-only.</p>
+      <p class="footnote">Automatic work reviews and tests source changes before publishing to main. Reviewed helper updates apply at startup with rollback. OS and driver updates require the verified image recovery workflow.</p>
     </aside>
   </main>
   <script type="module" src="/app.js"></script>

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "repository": "o0space0o/Microsoft-Windows-Dev-Kit-2023-Volterra-Blackrock",
+  "branch": "main",
+  "pollIntervalMs": 300000,
+  "retryLimit": 3,
+  "tasks": [
+    { "id": "runtime", "title": "Verify the live Validation OS runtime", "instruction": "Inspect the current system and boot-runtime.json. Verify the automatic OS root workspace, persistent history, browser, native Codex sandbox and sign-in. Resolve supported runtime failures. Report missing evidence or credentials as blocked; do not infer a working OS from a successful image build." },
+    { "id": "tools", "title": "Build the organized system tools", "instruction": "Continue implementing real devices, services, storage, files, networking, logs and maintenance tools from PROJECT_BRIEF.md. Preserve the approved artwork. Make one tested increment per turn; report complete only when the requested tool coverage is implemented and verified." },
+    { "id": "hardware", "title": "Verify Dev Kit hardware", "instruction": "Inventory actual Microsoft Windows Dev Kit 2023 hardware and verify each Microsoft/Qualcomm driver, network, display, audio and NPU. Distinguish VM results from physical device results. Do not install firmware, change partitions or claim hardware tests without measurements." },
+    { "id": "recovery", "title": "Develop and verify OS image recovery", "instruction": "Continue the private image build and recovery workflow. Kernel, driver and OS package updates require a validated offline image and a boot-tested recovery path. Keep Windows 11 and the existing EFI/recovery partitions intact. Stage changes for restart; never reboot automatically. Stop with specific missing prerequisites if this OS cannot run the image servicing tools." }
+  ]
+}

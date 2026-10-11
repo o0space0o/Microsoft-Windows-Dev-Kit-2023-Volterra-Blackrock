@@ -1,0 +1,111 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'volterra-automation-'));
+process.env.VOLTERRA_STATE_DIR = path.join(temporary, 'state');
+const { Automation } = await import('../app/automation.mjs');
+const { applySourceUpdate } = await import('../scripts/Apply-SourceUpdate.mjs');
+const { allowedSource, validateSource } = await import('../app/source-policy.mjs');
+const config = { repository: 'o0space0o/Microsoft-Windows-Dev-Kit-2023-Volterra-Blackrock', branch: 'main', pollIntervalMs: 300_000, retryLimit: 3, tasks: [{ id: 'one', title: 'First task', instruction: 'Implement' }, { id: 'two', title: 'Second task', instruction: 'Verify' }] };
+function controller(name, changes = {}) {
+  const calls = [];
+  const repository = {
+    initialize: async () => {}, compare: async () => ({ current: 'a'.repeat(40), latest: 'a'.repeat(40), ahead: 0, behind: 0, diverged: false }),
+    checkpoint: async () => { calls.push('checks'); return { changed: true, commit: 'b'.repeat(40) }; },
+    push: async () => { calls.push('push'); return { commit: 'b'.repeat(40) }; }, ...changes
+  };
+  const runner = new Automation({ config, repository, directory: path.join(temporary, name), enabled: true, hooks: {
+    connected: () => true, active: () => false, work: async task => calls.push(`work:${task.id}`), review: async () => calls.push('review'), reviewRemote: async () => calls.push('remote-review')
+  } });
+  return { runner, calls };
+}
+test('automatic work is reviewed, checked and published before advancing; saved pause survives restart', async () => {
+  const { runner, calls } = controller('queue');
+  await runner.start();
+  assert.deepEqual(calls, ['work:one']);
+  await runner.completed('completed', { status: 'complete', summary: 'Implemented and tested' });
+  assert.deepEqual(calls, ['work:one', 'review']);
+  assert.equal(runner.saved.task, 0);
+  await runner.completed('completed', { status: 'complete', summary: 'Review passed' });
+  assert.deepEqual(calls, ['work:one', 'review', 'checks', 'push']);
+  assert.equal(runner.saved.task, 1);
+  await runner.pause(); runner.close();
+  const resumed = controller('queue'); await resumed.runner.start();
+  assert.deepEqual(resumed.calls, []);
+  await resumed.runner.resume();
+  assert.deepEqual(resumed.calls, ['work:two']);
+  resumed.runner.close();
+});
+test('failed independent checks retain the task and prevent any main push', async () => {
+  const { runner, calls } = controller('failed', { checkpoint: async () => { throw new Error('A required test failed'); } });
+  await runner.start();
+  await runner.completed('completed', { status: 'complete', summary: 'Candidate' });
+  await runner.completed('completed', { status: 'complete', summary: 'Review passed' });
+  assert.equal(runner.saved.phase, 'blocked'); assert.equal(runner.saved.task, 0);
+  assert.equal(calls.includes('push'), false); runner.close();
+});
+test('pausing or restarting during review never bypasses review on resume', async () => {
+  const first = controller('review-restart'); await first.runner.start();
+  await first.runner.completed('completed', { status: 'complete', summary: 'Unreviewed candidate' });
+  await first.runner.pause(); first.runner.close();
+  const next = controller('review-restart'); await next.runner.start(); await next.runner.resume();
+  assert.deepEqual(next.calls, ['review']); assert.equal(next.calls.includes('push'), false); next.runner.close();
+});
+test('diverged main is retained and remote updates require a review before staging', async () => {
+  const diverged = controller('diverged', { compare: async () => ({ diverged: true, behind: 1, ahead: 1 }) });
+  await diverged.runner.start(); assert.equal(diverged.runner.saved.phase, 'blocked'); assert.deepEqual(diverged.calls, []); diverged.runner.close();
+  const update = controller('update', { compare: async () => ({ current: 'a'.repeat(40), latest: 'b'.repeat(40), behind: 1, ahead: 0 }), stage: async () => ({ id: 'staged' }) });
+  await update.runner.start(); assert.deepEqual(update.calls, ['remote-review']);
+  await update.runner.completed('completed', { status: 'complete', summary: 'Remote review passed' });
+  assert.equal(update.runner.saved.phase, 'restart-pending'); assert.equal(update.calls.includes('push'), false); update.runner.close();
+});
+test('public source policy excludes OS files, runtimes, auth files and traversal', () => {
+  for (const file of ['Windows/System32/kernel.dll', 'private/tools/node.exe', 'app/auth.json', '../README.md', 'app/../../Windows/x.ps1', 'scripts/drivers.cat']) assert.equal(allowedSource(file), false, file);
+  assert.equal(allowedSource('app/auth.mjs'), true);
+});
+const digest = content => createHash('sha256').update(content).digest('hex');
+async function updateFixture(name) {
+  const directory = path.join(temporary, name), target = path.join(directory, 'installed'), source = path.join(directory, 'updates', 'candidate', 'source');
+  await fs.mkdir(path.join(target, 'app'), { recursive: true }); await fs.mkdir(path.join(source, 'app'), { recursive: true });
+  await fs.writeFile(path.join(target, 'app', 'sample.mjs'), 'previous'); await fs.writeFile(path.join(source, 'app', 'sample.mjs'), 'replacement');
+  const pending = { version: 1, phase: 'pending', id: 'candidate', target: await fs.realpath(target), source: await fs.realpath(source), base: 'a'.repeat(40), commit: 'b'.repeat(40), files: [{ file: 'app/sample.mjs', expected: digest('previous'), desired: digest('replacement') }] };
+  await fs.writeFile(path.join(directory, 'pending-update.json'), JSON.stringify(pending)); return { directory, target, source, pending };
+}
+test('an unconfirmed startup update rolls back; a healthy update is confirmed and retained', async () => {
+  const broken = await updateFixture('rollback');
+  assert.equal((await applySourceUpdate(broken)).status, 'applied');
+  assert.equal(await fs.readFile(path.join(broken.target, 'app/sample.mjs'), 'utf8'), 'replacement');
+  assert.equal((await applySourceUpdate(broken)).status, 'rolled-back');
+  assert.equal(await fs.readFile(path.join(broken.target, 'app/sample.mjs'), 'utf8'), 'previous');
+  const healthy = await updateFixture('healthy');
+  await applySourceUpdate(healthy);
+  assert.equal((await applySourceUpdate({ ...healthy, mode: 'confirm' })).status, 'confirmed');
+  assert.equal((await applySourceUpdate(healthy)).status, 'none');
+  assert.equal(await fs.readFile(path.join(healthy.target, 'app/sample.mjs'), 'utf8'), 'replacement');
+});
+test('a modified candidate or local file defers application without overwriting it', async () => {
+  const fixture = await updateFixture('tamper');
+  await fs.writeFile(path.join(fixture.source, 'app/sample.mjs'), 'tampered');
+  await assert.rejects(applySourceUpdate(fixture), /changed since staging/);
+  assert.equal(await fs.readFile(path.join(fixture.target, 'app/sample.mjs'), 'utf8'), 'previous');
+  const local = await updateFixture('local-change');
+  await fs.writeFile(path.join(local.target, 'app/sample.mjs'), 'local edits');
+  await assert.rejects(applySourceUpdate(local), /changed since staging/);
+  assert.equal(await fs.readFile(path.join(local.target, 'app/sample.mjs'), 'utf8'), 'local edits');
+});
+test('update traversal and external directory links cannot write outside the helper', async () => {
+  const fixture = await updateFixture('escape');
+  fixture.pending.files[0].file = '../outside.txt';
+  await fs.writeFile(path.join(fixture.directory, 'pending-update.json'), JSON.stringify(fixture.pending));
+  await assert.rejects(applySourceUpdate(fixture), /Protected update path/);
+  const linked = await updateFixture('linked');
+  const outside = path.join(temporary, 'outside'); await fs.mkdir(outside);
+  await fs.symlink(outside, path.join(linked.target, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+  linked.pending.files[0].file = 'linked/file.mjs';
+  await fs.writeFile(path.join(linked.directory, 'pending-update.json'), JSON.stringify(linked.pending));
+  await assert.rejects(applySourceUpdate(linked), /Protected update path/);
+});
+test.after(async () => { await fs.rm(temporary, { recursive: true, force: true }); });

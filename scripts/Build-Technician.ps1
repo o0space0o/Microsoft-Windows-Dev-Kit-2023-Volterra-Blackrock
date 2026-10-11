@@ -36,7 +36,7 @@ try {
         if ((Test-Path -LiteralPath $boot) -or (Test-Path -LiteralPath $data) -or (Get-VM -Name $vmName -ErrorAction SilentlyContinue)) { throw 'An existing technician build will not be overwritten.' }
         $sourceBoot = 'C:\Users\_420\Documents\VolBlickro\build\vb-arm64-candidate-002\technician\boot.vhdx'
         if ((Get-VHD -Path $sourceBoot).ParentPath) { throw 'The clean Windows PE source must be a base disk.' }
-        Status 'Copying clean ARM64 Windows PE boot media; replacing its startup with this project’s script'
+        Status 'Copying clean ARM64 Windows PE boot media and replacing its startup with this project script'
         Copy-Item -LiteralPath $sourceBoot -Destination $boot
         $bootRoot = PartitionRoot $boot
         $peMount = Join-Path $owned 'pe-mount'
