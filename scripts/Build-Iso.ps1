@@ -224,8 +224,14 @@ try {
     Save 'boot-media-manifest.json' @{ sourceIso=$sourceIso; sourceIsoSHA256=$bootSource.sourceIso.sha256; sourceIsoBytes=$bootSource.sourceIso.bytes; privateBootSourceSHA256=$bootConfigHash; files=$mediaFiles.ToArray(); stockBcdPreserved=$true; stockEfiImageSHA256=$bootSource.bootFiles.'efi/Microsoft/Boot/efisys_noprompt.bin'; rootBootmgrPresent=$legacyManagerPresent; legacyBootBcdPresent=(Test-Path -LiteralPath (Join-Path $media 'boot/BCD')); stockLayoutPreserved=$true; architecture='arm64'; priorMediaProof=$bootSource.priorMediaProof; privateDevelopmentOnly=$true; redistributionRightsEstablished=$false; publicDistributionAllowed=$false }
     Assert-Owned $iso | Out-Null
     if (Test-Path -LiteralPath $iso) { throw 'Existing ISO output will not be overwritten.' }
-    $toolOutput = & $oscdimg -m -o -u2 -udfver102 -lVOLTERRA_ARM64 "-bootdata:1#pEF,e,b$efiImage" $media $iso 2>&1
-    $toolExitCode = $LASTEXITCODE
+    # Windows PowerShell 5 wraps redirected native stderr as ErrorRecords.
+    # Oscdimg reports normal progress on stderr; its exit code determines success.
+    $savedPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $toolOutput = & $oscdimg -m -o -u2 -udfver102 -lVOLTERRA_ARM64 "-bootdata:1#pEF,e,b$efiImage" $media $iso 2>&1
+        $toolExitCode = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $savedPreference }
     $outputBytes = [Text.UTF8Encoding]::new($false).GetBytes(($toolOutput -join [Environment]::NewLine))
     $outputFile = [IO.File]::Open((Assert-Owned (Join-Path $build 'iso-output.txt')),[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
     try { $outputFile.Write($outputBytes,0,$outputBytes.Length); $outputFile.Flush($true) } finally { $outputFile.Dispose() }
