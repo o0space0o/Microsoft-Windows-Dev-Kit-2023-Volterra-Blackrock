@@ -9,6 +9,7 @@ export function describeProgress(state, connected = true) {
   if (state.systemTool?.kind === 'files') return { phase: 'checking', title: 'Reading workspace files', detail: 'Collecting root entry names, types, sizes and modification times.', active: true };
   if (state.systemTool?.kind === 'logs') return { phase: 'checking', title: 'Reading Windows event logs', detail: 'Collecting bounded System and Application event metadata for this OS session.', active: true };
   if (state.systemTool?.kind === 'maintenance') return { phase: 'checking', title: 'Reading maintenance restart requirements', detail: 'Checking local Windows Update and pending file-operation signals.', active: true };
+  if (state.systemTool?.kind === 'processes') return { phase: 'checking', title: 'Reading Windows processes', detail: 'Collecting local process IDs, names and available memory readings.', active: true };
   const phase = state.automation?.phase;
   if (state.activeTurn && ['paused', 'blocked', 'restart-pending'].includes(phase)) return { phase: 'replying', title: 'Codex is replying', detail: 'The automatic job is saved while Codex answers your message.', active: true };
   if (phase === 'paused' || state.paused) return { phase: 'paused', title: 'Codex is paused', detail: 'Saved work is retained. Say “continue” whenever you want it to resume.', active: false };
