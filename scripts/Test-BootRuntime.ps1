@@ -15,6 +15,19 @@ function Evaluate {
     if ($LASTEXITCODE -ne 0) { throw 'The runtime evidence evaluator could not run.' }
     $script:result = $evaluated | ConvertFrom-Json
 }
+function Observe-Helper([int]$TimeoutMs=120000) {
+    $observation = & $node (Join-Path $PSScriptRoot 'Probe-HelperRuntime.mjs') $Port $TimeoutMs
+    $probeExit = $LASTEXITCODE
+    $state = $observation | ConvertFrom-Json
+    $result.automaticWorkspace = $state.automaticWorkspace
+    $result.serverReady = $state.serverReady
+    $result.helperRuntimeReady = $state.helperRuntimeReady
+    $result.helperRuntimeRunning = $state.helperRuntimeRunning
+    $result.helperChatgptAccountObserved = $state.helperChatgptAccountObserved
+    $result.historyContext = @{ directory=$env:VOLTERRA_STATE_DIR; codexHome=$env:CODEX_HOME; sourceRoot=$taskRoot; osRoot=$result.systemRoot; bootId=$result.bootId; project=$state.project }
+    if ($probeExit -ne 0) { $result.errors += $state.error }
+    return $state
+}
 try {
     New-Item -ItemType Directory -Path (Split-Path -Parent $output) -Force | Out-Null
     Save
@@ -32,20 +45,7 @@ try {
         } catch { $result.errors += $_.Exception.Message }
     }
     $result.versionsVerified = $result.versions.Count -eq 4
-    $deadline = [DateTime]::UtcNow.AddMinutes(2)
-    do {
-        try {
-            $page = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -UseBasicParsing -SessionVariable localSession
-            $state = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/state" -WebSession $localSession
-            if (-not $state.runtimeReady) { throw 'The helper is still initializing its Codex connection.' }
-            $result.automaticWorkspace = $state.project.path
-            $result.serverReady = $true
-            $result.helperRuntimeRunning = $state.running
-            $result.helperChatgptAccountObserved = $state.authMode -eq 'codex' -and $state.account.type -eq 'chatgpt'
-            $result.historyContext = @{ directory=$env:VOLTERRA_STATE_DIR; codexHome=$env:CODEX_HOME; sourceRoot=$taskRoot; osRoot=$result.systemRoot; bootId=$result.bootId; project=@{ path=$state.project.path; threadId=$state.project.threadId } }
-            break
-        } catch { if ([DateTime]::UtcNow -ge $deadline) { $result.errors += $_.Exception.Message; break }; Start-Sleep -Seconds 3 }
-    } while ($true)
+    $state = Observe-Helper
     $previousProbeThread = $env:VOLTERRA_PROBE_THREAD_ID
     try {
         $env:VOLTERRA_PROBE_THREAD_ID = $state.project.threadId
@@ -76,6 +76,9 @@ try {
         $result.browser.renderCaptured = $browserEvidence.renderCaptured
     } catch { $result.errors += $_.Exception.Message }
     finally { if ($browserOutput -and (Test-Path -LiteralPath $browserOutput)) { Remove-Item -LiteralPath $browserOutput } }
+    # Browser and standalone Codex probes take time. Refresh the application
+    # observation so a stopped helper or changed thread cannot use stale proof.
+    $state = Observe-Helper -TimeoutMs 5000
     Evaluate
     $result | Add-Member -NotePropertyName sourceUpdate -NotePropertyValue @{ status='unconfirmed'; reason='Startup health has not passed.' }
     if ($result.startupHealthy) {

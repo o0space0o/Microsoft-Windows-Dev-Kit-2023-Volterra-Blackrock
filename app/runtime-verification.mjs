@@ -1,13 +1,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { atomic } from './storage.mjs';
 import { redact } from './platform.mjs';
 
 // Keep completed observations when a later stage fails. Initialization is not
 // authentication, sandbox execution, model access or Validation OS acceptance.
 export async function probeCodexRuntime(bridge, { powershell, cwd, threadId } = {}) {
-  const report = { appServerInitialized: false, chatgptAccountObserved: false, nativeSandboxReady: false, sandboxCommandCompleted: false, savedThreadReadable: false, errors: [] };
+  const report = { appServerInitialized: false, chatgptAccountObserved: false, nativeSandboxReady: false, sandboxCommandCompleted: false, savedThreadReadable: false, savedThreadId: null, errors: [] };
   const diagnostics = [];
   const diagnostic = text => { diagnostics.push(redact(text)); if (diagnostics.length > 10) diagnostics.shift(); };
   bridge.on('diagnostic', diagnostic);
@@ -35,6 +36,7 @@ export async function probeCodexRuntime(bridge, { powershell, cwd, threadId } = 
       try {
         const result = await bridge.request('thread/read', { threadId, includeTurns: false });
         report.savedThreadReadable = result.thread?.id === threadId;
+        if (report.savedThreadReadable) report.savedThreadId = threadId;
       } catch (error) { report.errors.push(redact(error.message)); }
     }
   } catch (error) { report.errors.push(redact(error.message)); }
@@ -48,13 +50,55 @@ function inside(base, value) {
   return relative === '' || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative));
 }
 
+// Each observation uses a fresh launch cookie and snapshot. A listening HTTP
+// server or a spawned Codex process does not establish protocol readiness.
+export async function waitForHelperRuntime(origin, { timeoutMs = 120000, intervalMs = 3000, fetchImpl = fetch, now = Date.now, delay = sleep } = {}) {
+  const address = new URL(origin);
+  if (address.protocol !== 'http:' || address.hostname !== '127.0.0.1' || address.username || address.password || address.pathname !== '/' || address.search || address.hash) throw new Error('Runtime verification requires the local helper origin.');
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !Number.isFinite(intervalMs) || intervalMs <= 0) throw new Error('Runtime polling needs positive finite time limits.');
+  const deadline = now() + timeoutMs;
+  let report = { serverReady: false, helperRuntimeReady: false, helperRuntimeRunning: false, helperChatgptAccountObserved: false, project: null };
+  let error;
+  do {
+    try {
+      const signal = AbortSignal.timeout(Math.max(1, Math.min(10000, Math.ceil(deadline - now()))));
+      const page = await fetchImpl(address.origin + '/', { signal, redirect: 'error' });
+      if (!page.ok) throw new Error(`Helper page returned HTTP ${page.status}.`);
+      const cookie = page.headers.get('set-cookie')?.split(';')[0];
+      // Consume the response to release the connection without retaining DOM
+      // containing a launch token. Never log cookies or complete snapshots.
+      await page.arrayBuffer();
+      if (!cookie) throw new Error('The helper did not issue its launch cookie.');
+      const response = await fetchImpl(address.origin + '/api/state', { headers: { cookie }, signal, redirect: 'error' });
+      if (!response.ok) throw new Error(`Helper state returned HTTP ${response.status}.`);
+      const state = await response.json();
+      report = {
+        serverReady: true, automaticWorkspace: state.project?.path,
+        helperRuntimeReady: state.runtimeReady === true && state.running === true,
+        helperRuntimeRunning: state.running === true,
+        helperChatgptAccountObserved: state.authMode === 'codex' && state.account?.type === 'chatgpt',
+        project: state.project ? { path: state.project.path, threadId: state.project.threadId } : null
+      };
+      if (report.helperRuntimeReady) return report;
+      error = 'The helper has not finished initializing its Codex connection.';
+    } catch (failure) {
+      report = { serverReady: false, helperRuntimeReady: false, helperRuntimeRunning: false, helperChatgptAccountObserved: false, project: null };
+      error = redact(failure.message);
+    }
+    const remaining = deadline - now();
+    if (remaining <= 0) break;
+    await delay(Math.min(intervalMs, remaining));
+  } while (now() < deadline);
+  return { ...report, error };
+}
+
 export async function probePersistentHistory({ directory, codexHome, sourceRoot, osRoot, bootId, project }) {
   const report = { storageConfigured: false, historyReadable: false, survivedBoot: false };
   if (!directory || !codexHome || !sourceRoot || !osRoot || !bootId) return report;
   try {
     const [stateRoot, home, source] = await Promise.all([fs.realpath(directory), fs.realpath(codexHome), fs.realpath(sourceRoot)]);
     const systemVolume = path.parse(osRoot).root.toLowerCase(), stateVolume = path.parse(stateRoot).root.toLowerCase();
-    if (inside(source, stateRoot) || !inside(stateRoot, home) || home === stateRoot || path.parse(home).root.toLowerCase() !== stateVolume || home !== await fs.realpath(path.join(stateRoot, 'codex')) || (systemVolume === 'x:\\' ? stateVolume === systemVolume : stateVolume !== systemVolume)) return report;
+    if (inside(source, stateRoot) || inside(source, home) || !inside(stateRoot, home) || home === stateRoot || path.parse(home).root.toLowerCase() !== stateVolume || home !== await fs.realpath(path.join(stateRoot, 'codex')) || (systemVolume === 'x:\\' ? stateVolume === systemVolume : stateVolume !== systemVolume)) return report;
     report.storageConfigured = true;
     if (!project?.threadId) return report;
     const saved = JSON.parse(await fs.readFile(path.join(stateRoot, 'state.json'), 'utf8'));
@@ -88,9 +132,9 @@ export function evaluateBootRuntime(report) {
     validationOS: report.edition === 'WinVOS',
     runtimeExecutables: report.versionsVerified === true,
     automaticWorkspace: report.serverReady === true && typeof report.systemRoot === 'string' && typeof report.automaticWorkspace === 'string' && path.win32.normalize(report.automaticWorkspace).toLowerCase() === path.win32.normalize(report.systemRoot).toLowerCase(),
-    persistentHistory: report.history?.storageConfigured === true && report.history.historyReadable === true && report.history.survivedBoot === true && report.codexProtocol?.savedThreadReadable === true,
+    persistentHistory: report.history?.storageConfigured === true && report.history.historyReadable === true && report.history.survivedBoot === true && report.codexProtocol?.savedThreadReadable === true && typeof report.codexProtocol.savedThreadId === 'string' && report.codexProtocol.savedThreadId === report.historyContext?.project?.threadId,
     browser: report.browser?.executableMatched === true && report.browser.helperScriptExecuted === true && report.browser.renderCaptured === true,
-    nativeCodexSandbox: report.helperRuntimeRunning === true && report.codexProtocol?.appServerInitialized === true && report.codexProtocol.nativeSandboxReady === true && report.codexProtocol.sandboxCommandCompleted === true,
+    nativeCodexSandbox: report.helperRuntimeReady === true && report.helperRuntimeRunning === true && report.codexProtocol?.appServerInitialized === true && report.codexProtocol.nativeSandboxReady === true && report.codexProtocol.sandboxCommandCompleted === true,
     signIn: report.helperChatgptAccountObserved === true && report.codexProtocol?.chatgptAccountObserved === true
   };
   const prerequisites = {
