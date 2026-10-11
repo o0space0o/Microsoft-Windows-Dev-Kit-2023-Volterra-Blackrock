@@ -110,8 +110,10 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     if (!account && state.authMode === 'codex') throw new Error('Sign in to Codex using ChatGPT before starting work.');
     if (loadedThread === project.threadId && loadedThread) return project;
     const options = { cwd: project.path, sandbox: 'workspace-write', approvalPolicy: 'on-request' };
+    let hostRestrictions = '';
+    try { hostRestrictions = await fs.readFile(path.join(stateDirectory, 'approval-blocks.txt'), 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     const result = project.threadId ? await codex.request('thread/resume', { ...options, threadId: project.threadId })
-      : await codex.request('thread/start', { ...options, developerInstructions: 'Read AGENTS.md and PROJECT_BRIEF.md. The user authorized autonomous development, tested source commits to main and staged helper updates. Work in the automatic OS root; original application source is under Volterra. Keep kernel/driver/boot changes in the verified offline-image and recovery workflow. Preserve Windows 11, EFI and recovery partitions. Never restart automatically. Report missing proof and required restarts. Do not publish vendor OS binaries or credentials. The host preview must not alter the current Windows installation.' });
+      : await codex.request('thread/start', { ...options, developerInstructions: 'Read AGENTS.md and PROJECT_BRIEF.md. The user authorized autonomous development, tested source commits to main and staged helper updates. Work in the automatic OS root; original application source is under Volterra. Keep kernel/driver/boot changes in the verified offline-image and recovery workflow. Preserve Windows 11, EFI and recovery partitions. Never restart automatically. Report missing proof and required restarts. Do not publish vendor OS binaries or credentials. The host preview must not alter the current Windows installation.\n' + hostRestrictions });
     project.threadId = result.thread.id; loadedThread = project.threadId; await saveState(state); publish(); return project;
   }
   async function checkRestart() {
@@ -208,7 +210,13 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
       const child = spawn(executable('gh'), ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web'], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
       github = { pending: true }; publish();
       child.stdin.end();
-      for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => event('notice', redact(chunk.toString())));
+      let signInOutput = '';
+      for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => {
+        const text = chunk.toString(); event('notice', redact(text));
+        signInOutput = (signInOutput + text).slice(-4000);
+        const code = signInOutput.match(/\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/);
+        if (code && github?.pending) { github.userCode = code[1]; publish(); }
+      });
       child.once('error', error => { github = null; event('error', error.message); publish(); });
       child.once('exit', async code => {
         try { github = code === 0 ? { login: await run(executable('gh'), ['api', 'user', '--jq', '.login']) } : null; if (code !== 0) event('error', 'GitHub sign-in did not complete.'); }
@@ -284,7 +292,11 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
   automation = new Automation({ config, repository, enabled: autostart, hooks: {
     connected: () => !!account, active: () => !!activeTurn,
     changed: publish, notice: message => event('notice', message),
-    work: async (task, saved) => automaticTurn(`Continue the saved thread. This is the authorized automatic queue for ${config.repository}, branch main.\nTask: ${task.title}\n${task.instruction}\nPrevious issue: ${saved.lastError || 'None'}\nImplement one verifiable increment. Do not commit or push yourself: the controller runs independent checks and publishes after review. Return status progress for a tested increment, complete when this task's acceptance evidence exists, or blocked with a specific prerequisite.\n\n${await fs.readFile(path.join(root, 'PROJECT_BRIEF.md'), 'utf8')}`),
+    work: async (task, saved) => {
+      let restrictions = '';
+      try { restrictions = await fs.readFile(path.join(stateDirectory, 'approval-blocks.txt'), 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      return automaticTurn(`Continue the saved thread. This is the authorized automatic queue for ${config.repository}, branch main.\nTask: ${task.title}\n${task.instruction}\nPrevious issue: ${saved.lastError || 'None'}\nImplement one verifiable increment. Do not commit or push yourself: the controller runs independent checks and publishes after review. Return status progress for a tested increment, complete when this task's acceptance evidence exists, or blocked with a specific prerequisite.\nHost restrictions: ${restrictions || 'No additional host restriction recorded.'}\n\n${await fs.readFile(path.join(root, 'PROJECT_BRIEF.md'), 'utf8')}`);
+    },
     review: outcome => automaticTurn(`Review the current source changes independently. Read the diff, inspect tests, preserve the approved reference hashes, and check for credentials or vendor binaries. Do not edit or publish. Return complete only if the increment is correct and safe to checkpoint; otherwise return blocked with actionable findings. Work summary: ${outcome.summary}`, true),
     reviewRemote: comparison => automaticTurn(`Review GitHub main changes from ${comparison.current} to ${comparison.latest} in repository ${config.repository}. Use git -C "${root}" to inspect the fetched diff. Do not edit, checkout or publish. Return complete only if the change fits the project and contains no protected OS/credential/vendor files. The controller separately validates and tests a detached snapshot before staging it for restart. Otherwise return blocked with actionable findings.`, true)
   } });

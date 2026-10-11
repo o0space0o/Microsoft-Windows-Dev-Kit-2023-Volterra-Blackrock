@@ -26,6 +26,8 @@ function render(value) {
   $('#status').textContent = `${value.running ? 'Codex ready' : 'Codex not started'} · ${value.account ? 'ChatGPT connected' : 'ChatGPT not connected'} · ${value.github?.login ? `GitHub: ${value.github.login}` : 'GitHub not connected'}\n${value.project?.path || 'No project folder selected'}\n${value.activeTurn ? 'Working · progress streams below' : value.paused ? 'Paused · history saved' : 'Ready for your message'}`;
   $('#plan').textContent = value.account ? `Using ChatGPT plan · ${value.account.source}` : 'Connect ChatGPT to begin';
   $('#restart').classList.toggle('hidden', !value.restartRequired);
+  $('#github-code').classList.toggle('hidden', !value.github?.userCode);
+  $('#github-code').textContent = value.github?.userCode ? `GitHub code: ${value.github.userCode} · Enter it at github.com/login/device` : '';
   $('#automation-status').textContent = value.automation ? `${value.automation.enabled ? 'Automatic work' : 'Automation ready'} · ${value.automation.phase}\n${value.automation.taskTitle} · GitHub main${value.automation.lastError ? '\n' + value.automation.lastError : ''}` : '';
   if (value.project && document.activeElement !== $('#folder')) $('#folder').value = value.project.path;
   $('#requests').replaceChildren();
