@@ -1,6 +1,9 @@
 #Requires -RunAsAdministrator
 [CmdletBinding()]
-param([ValidatePattern('^development-[0-9]{3}$')][string]$BuildName='development-007')
+param(
+    [ValidatePattern('^development-[0-9]{3}$')][string]$BuildName='development-007',
+    [string]$SourceReceipt
+)
 $ErrorActionPreference='Stop'
 $workspace=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $base=Join-Path $workspace 'build\development-006'
@@ -16,7 +19,7 @@ try {
     foreach ($file in @('boot.wim','install.wim','result.json')) { Copy-Item -LiteralPath (Join-Path $base ('output\'+$file)) -Destination (Join-Path $build 'output') }
     Copy-Item -LiteralPath (Join-Path $base 'image-receipt.json') -Destination $build
     Save @{status='running';base='development-006';build=$BuildName;phase='Refreshing original helper source only'}
-    & (Join-Path $PSScriptRoot 'Finalize-ImagePayload.ps1') -BuildName $BuildName
+    & (Join-Path $PSScriptRoot 'Finalize-ImagePayload.ps1') -BuildName $BuildName -SourceReceipt $SourceReceipt
     if ($LASTEXITCODE -ne 0) { throw 'File-only helper overlay failed.' }
     Save @{status='running';base='development-006';build=$BuildName;phase='Building private ARM64 ISO'}
     & (Join-Path $PSScriptRoot 'Build-Iso.ps1') -BuildName $BuildName

@@ -20,12 +20,15 @@ try {
     if ((Get-Content -LiteralPath $finalized -Raw | ConvertFrom-Json).status -ne 'passed') { throw 'Final helper payload has not been verified.' }
     $result = Get-Content -LiteralPath (Join-Path $build 'output\result.json') -Raw | ConvertFrom-Json
     $receipt = Get-Content -LiteralPath (Join-Path $build 'image-receipt.json') -Raw | ConvertFrom-Json
+    $finalSource = Get-Content -LiteralPath $finalized -Raw | ConvertFrom-Json
+    if ($receipt.sourceCommit -notmatch '^[a-f0-9]{40}$' -or $finalSource.sourceCommit -ne $receipt.sourceCommit) { throw 'The image source commit is not bound to its finalization receipt.' }
     if ($result.status -ne 'passed' -or $result.build -ne 'development-006') { throw 'Successful VM servicing is required.' }
     if ((Get-FileHash -LiteralPath (Join-Path $build 'output\boot.wim')).Hash -ne $receipt.bootSHA256 -or (Get-FileHash -LiteralPath (Join-Path $build 'output\install.wim')).Hash -ne $receipt.installSHA256) { throw 'Captured image hashes changed.' }
     if ((Test-Path -LiteralPath $media) -or (Test-Path -LiteralPath $iso)) { throw 'Existing media will not be overwritten.' }
     foreach ($folder in @('sources','boot','efi\boot','efi\Microsoft\Boot\Fonts')) { New-Item -ItemType Directory -Path (Join-Path $media $folder) -Force | Out-Null }
     Copy-Item -LiteralPath (Join-Path $build 'output\boot.wim') -Destination (Join-Path $media 'sources\boot.wim')
     Copy-Item -LiteralPath (Join-Path $build 'output\install.wim') -Destination (Join-Path $media 'sources\install.wim')
+    if ((Get-FileHash -LiteralPath (Join-Path $media 'sources\boot.wim')).Hash -ne $receipt.bootSHA256 -or (Get-FileHash -LiteralPath (Join-Path $media 'sources\install.wim')).Hash -ne $receipt.installSHA256) { throw 'Copied media image hashes changed.' }
     Copy-Item -LiteralPath "$env:SystemRoot\Boot\DVD\EFI\boot.sdi" -Destination (Join-Path $media 'boot\boot.sdi')
     Copy-Item -LiteralPath "$env:SystemRoot\Boot\EFI\bootmgfw.efi" -Destination (Join-Path $media 'efi\boot\bootaa64.efi')
     Copy-Item -LiteralPath "$env:SystemRoot\Boot\EFI\bootmgfw.efi" -Destination (Join-Path $media 'efi\Microsoft\Boot\bootmgfw.efi')
@@ -54,6 +57,6 @@ try {
     $efi = Join-Path $adk 'arm64\Oscdimg\efisys_noprompt.bin'
     & (Join-Path $adk 'arm64\Oscdimg\oscdimg.exe') -m -o -u2 -udfver102 -lVOLTERRA_ARM64 "-bootdata:1#pEF,e,b$efi" $media $iso > (Join-Path $build 'iso-output.txt')
     if ($LASTEXITCODE -ne 0) { throw "ISO creation failed ($LASTEXITCODE)." }
-    Save 'iso-receipt.json' @{ path=$iso; sha256=(Get-FileHash -LiteralPath $iso).Hash; bytes=(Get-Item -LiteralPath $iso).Length; architecture='arm64'; bootTested=$false; privateDevelopmentOnly=$true }
+    Save 'iso-receipt.json' @{ path=$iso; sha256=(Get-FileHash -LiteralPath $iso).Hash; bytes=(Get-Item -LiteralPath $iso).Length; sourceCommit=$receipt.sourceCommit; architecture='arm64'; bootTested=$false; privateDevelopmentOnly=$true }
     Save 'Iso-result.json' @{ status='passed' }
 } catch { Save 'Iso-result.json' @{ status='failed'; error=$_.Exception.Message }; exit 1 }
