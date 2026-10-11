@@ -10,6 +10,6 @@ if not exist "%VOLTERRA_ROOT%\private\tools\node.exe" (
   echo The helper payload is missing. This build is incomplete.
   exit /b 1
 )
-powershell -NoProfile -File "%VOLTERRA_ROOT%\scripts\Start-Volterra.ps1" -Boot
+"%VOLTERRA_ROOT%\private\tools\node.exe" "%VOLTERRA_ROOT%\scripts\Start-Volterra.mjs" --boot
 echo.
 echo The helper stopped. Review the output above before restarting it.

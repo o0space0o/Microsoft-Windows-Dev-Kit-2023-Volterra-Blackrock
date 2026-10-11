@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { stateDirectory } from './storage.mjs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { openSystemBrowser } from '../scripts/Open-Browser.mjs';
 
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const powershell = process.platform === 'win32'
@@ -25,10 +26,10 @@ export function executable(name) {
   return existsSync(portable) ? portable : name;
 }
 export async function openBrowser(value) {
+  if (process.platform === 'win32') return openSystemBrowser(value, { root, profile: path.join(stateDirectory, 'browser') });
   const url = new URL(value);
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && url.hostname === '127.0.0.1')) throw new Error('Unsupported browser address');
-  if (powershell) await run(powershell, ['-NoProfile', '-File', path.join(root, 'scripts', 'Open-Browser.ps1'), '-Url', url.href], { env: { ...process.env, VOLTERRA_BROWSER_PROFILE: path.join(stateDirectory, 'browser') } });
-  else await run(process.platform === 'darwin' ? 'open' : 'xdg-open', [url.href]);
+  if (url.username || url.password || (url.protocol !== 'https:' && !(url.protocol === 'http:' && url.hostname === '127.0.0.1'))) throw new Error('Unsupported browser address');
+  return run(process.platform === 'darwin' ? 'open' : 'xdg-open', [url.href]);
 }
 export async function chooseFolder() {
   if (!powershell) throw new Error('Enter the absolute project folder path on this system.');

@@ -77,6 +77,29 @@ test('common credential formats are removed from display output', () => {
   assert.equal(redact('ghp_abcdefghijklmnop'), '[redacted token]');
 });
 
+test('public ChatGPT sign-in endpoint uses native Codex browser authorization without an app credential', async () => {
+  const opened = [];
+  class NativeLoginCodex extends FakeCodex {
+    async request(method, params) {
+      if (method === 'account/login/start') { this.calls.push({ method, params }); return { loginId: 'native-login', authUrl: 'https://auth.openai.com/authorize?state=native-test' }; }
+      return super.request(method, params);
+    }
+  }
+  const fake = new NativeLoginCodex(), app = await createApplication({ port: 0, codex: fake, browserOpener: async url => opened.push(url) });
+  try {
+    const page = await fetch(app.origin), html = await page.text();
+    const token = html.match(/name="volterra-session" content="([a-f0-9]+)"/)[1];
+    const headers = { Cookie: page.headers.get('set-cookie').split(';')[0], 'Content-Type': 'application/json', 'X-Volterra-Client': token };
+    const response = await fetch(app.origin + '/api/chatgpt/sign-in', { method: 'POST', headers, body: '{}' });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).status, 'Waiting for browser sign-in');
+    assert.deepEqual(fake.calls.find(call => call.method === 'account/login/start').params, { type: 'chatgpt' });
+    assert.deepEqual(opened, ['https://auth.openai.com/authorize?state=native-test']);
+    assert.equal(app.state.authMode, 'codex');
+    await assert.rejects(fs.stat(path.join(process.env.VOLTERRA_STATE_DIR, 'chatgpt.dpapi')), { code: 'ENOENT' });
+  } finally { await app.close(); }
+});
+
 test('OS root is selected without setup and first browser sign-in starts the project brief once', async () => {
   const system = path.join(directory, 'system'); await fs.mkdir(system);
   process.env.VOLTERRA_OS_ROOT = system;

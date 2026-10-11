@@ -7,7 +7,7 @@ import { redact } from './platform.mjs';
 
 // Keep completed observations when a later stage fails. Initialization is not
 // authentication, sandbox execution, model access or Validation OS acceptance.
-export async function probeCodexRuntime(bridge, { powershell, cwd, threadId } = {}) {
+export async function probeCodexRuntime(bridge, { powershell, cwd, threadId, versionCommand } = {}) {
   const report = { appServerInitialized: false, chatgptAccountObserved: false, nativeSandboxReady: false, sandboxCommandCompleted: false, savedThreadReadable: false, savedThreadId: null, errors: [] };
   const diagnostics = [];
   const diagnostic = text => { diagnostics.push(redact(text)); if (diagnostics.length > 10) diagnostics.shift(); };
@@ -26,7 +26,7 @@ export async function probeCodexRuntime(bridge, { powershell, cwd, threadId } = 
       if (!report.nativeSandboxReady) report.errors.push(`Native Codex sandbox is ${readiness.status || 'unverified'}. No setup or elevation was attempted.`);
       // Do not fall back to an unsandboxed command when readiness is missing.
       if (report.nativeSandboxReady) {
-        const execution = await bridge.request('command/exec', { command: [powershell, '-NoProfile', '-Command', '[Environment]::OSVersion.Version.ToString()'], cwd, sandboxPolicy: { type: 'readOnly', networkAccess: false }, timeoutMs: 10000 });
+        const execution = await bridge.request('command/exec', { command: versionCommand || [powershell, '-NoProfile', '-Command', '[Environment]::OSVersion.Version.ToString()'], cwd, sandboxPolicy: { type: 'readOnly', networkAccess: false }, timeoutMs: 10000 });
         report.sandboxCommandCompleted = execution.exitCode === 0 && /^\d+\.\d+\.\d+(?:\.\d+)?$/.test(execution.stdout.trim());
         if (report.sandboxCommandCompleted) report.osVersion = execution.stdout.trim();
         else report.errors.push(`Native sandbox command failed (${execution.exitCode}): ${redact(execution.stderr || 'No OS version returned.')}`);
@@ -94,7 +94,7 @@ export async function waitForHelperRuntime(origin, { timeoutMs = 120000, interva
 
 export async function probePersistentHistory({ directory, codexHome, sourceRoot, osRoot, bootId, project }) {
   const report = { storageConfigured: false, historyReadable: false, survivedBoot: false };
-  if (!directory || !codexHome || !sourceRoot || !osRoot || !bootId) return report;
+  if (!directory || !codexHome || !sourceRoot || !osRoot) return report;
   try {
     const [stateRoot, home, source] = await Promise.all([fs.realpath(directory), fs.realpath(codexHome), fs.realpath(sourceRoot)]);
     const systemVolume = path.parse(osRoot).root.toLowerCase(), stateVolume = path.parse(stateRoot).root.toLowerCase();
@@ -108,6 +108,9 @@ export async function probePersistentHistory({ directory, codexHome, sourceRoot,
     });
     report.historyReadable = saved.selected === project.path && saved.projects?.[project.path]?.threadId === project.threadId && entries.length > 0;
     if (!report.historyReadable) return report;
+    // Storage and readable history can be observed without a boot identity.
+    // A launch UUID or process start time must never create a reboot witness.
+    if (typeof bootId !== 'string' || !bootId) return report;
     const file = path.join(stateRoot, 'runtime-history-witness.json');
     let previous;
     try { previous = JSON.parse(await fs.readFile(file, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }

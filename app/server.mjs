@@ -13,8 +13,9 @@ import { serviceQuery, collectServices, inspectServices, serviceReport } from '.
 import { deviceQuery, collectDevices, inspectDevices, deviceReport } from './device-tools.mjs';
 import { storageQuery, collectStorage, inspectStorage, storageReport } from './storage-tools.mjs';
 import { networkQuery, collectNetworking, inspectNetworking, networkReport } from './network-tools.mjs';
+import { githubBrowserCommand } from '../scripts/Open-Browser.mjs';
 
-export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices, storageCollector = collectStorage, networkCollector = collectNetworking } = {}) {
+export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices, storageCollector = collectStorage, networkCollector = collectNetworking, browserOpener = openBrowser } = {}) {
   const state = await readState();
   const defaultFolder = await fs.realpath(process.env.VOLTERRA_OS_ROOT || root);
   if (!state.selected || (process.env.VOLTERRA_OS_ROOT && state.selected !== defaultFolder)) {
@@ -149,14 +150,14 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     } catch { /* An unavailable registry probe must not stop the project helper. */ }
   }
   const actions = {
-    'chatgpt/sign-in': () => auth.begin(),
+    'chatgpt/sign-in': body => actions['codex/sign-in'](body || {}),
     'chatgpt/cancel': async () => { auth.cancel(); return {}; },
     'codex/connect': async () => { if (activeTurn) throw new Error('Interrupt the active job before changing accounts.'); await ensureRuntime('codex'); state.authMode = 'codex'; await saveState(state); publish(); return { connected: !!account }; },
     'codex/sign-in': async body => {
       if (activeTurn) throw new Error('Interrupt the active job before signing in again.');
       await ensureRuntime('codex'); state.authMode = 'codex'; await saveState(state);
       const result = await codex.request('account/login/start', { type: body.device ? 'chatgptDeviceCode' : 'chatgpt' });
-      await openBrowser(result.authUrl || result.verificationUrl);
+      await browserOpener(result.authUrl || result.verificationUrl);
       // Do not expose an authorization URL with state or identity hints to logs.
       return { status: 'Waiting for browser sign-in', userCode: result.userCode || null };
     },
@@ -249,7 +250,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
       if (github?.pending) throw new Error('GitHub browser sign-in is already pending.');
       const env = { ...process.env };
       env.VOLTERRA_BROWSER_PROFILE = path.join(stateDirectory, 'browser');
-      if (powershell) env.GH_BROWSER = `"${powershell}" -NoProfile -File "${path.join(root, 'scripts/Open-Browser.ps1')}" -Url`;
+      if (process.platform === 'win32') env.GH_BROWSER = githubBrowserCommand(process.execPath, path.join(root, 'scripts', 'Open-Browser.mjs'));
       const child = spawn(executable('gh'), ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web'], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
       github = { pending: true }; publish();
       child.stdin.end();
