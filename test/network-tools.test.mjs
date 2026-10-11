@@ -12,7 +12,7 @@ const { createApplication } = await import('../app/server.mjs');
 const { describeProgress } = await import('../app/public/progress.js');
 const ipv4 = { address: '192.0.2.10', family: 'IPv4', netmask: '255.255.255.0', internal: false, scopeId: null };
 const ipv6 = { address: 'fe80::1', family: 'IPv6', netmask: 'ffff:ffff:ffff:ffff::', internal: false, scopeId: 7 };
-const evidence = (patch = {}) => ({ version: 1, kind: 'networking', observedAt: '2026-10-11T18:00:00.000Z',
+const evidence = (patch = {}) => ({ version: 1, kind: 'networking', status: 'passed', error: null, observedAt: '2026-10-11T18:00:00.000Z',
   system: { platform: 'win32', release: 'fixture', runtimeArchitecture: 'arm64' }, interfaces: [
     { name: 'Fixture [wired]', addresses: [ipv6, ipv4] },
     { name: 'Loopback fixture', addresses: [{ address: '::1', family: 'IPv6', netmask: 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', internal: true, scopeId: 0 }] }
@@ -47,6 +47,7 @@ test('the local collector receives no filter and includes only address inventory
     return { Fixture: [{ ...ipv4, mac: 'Excluded fixture metadata', cidr: '192.0.2.10/24' }, { ...ipv6, scopeid: 7 }] };
   } });
   assert.equal(calls, 1); assert.ok(Number.isFinite(Date.parse(result.observedAt)));
+  assert.equal(result.status, 'passed'); assert.equal(result.error, null);
   assert.deepEqual(result.interfaces, [{ name: 'Fixture', addresses: [ipv4, ipv6] }]);
   await assert.rejects(collectNetworking({ readInterfaces: null }), /local network address API/);
   await assert.rejects(collectNetworking({ readInterfaces: () => [] }), /unsupported readings/);
@@ -166,6 +167,97 @@ test('an unavailable network API leaves a saved blocked report and clears checki
     const result = await app.actions['agent/send']({ text: 'show networking' });
     assert.equal(result.status, 'blocked'); assert.deepEqual(result.interfaces, []); assert.equal(app.snapshot().systemTool, null);
     assert.ok(app.snapshot().journal.some(entry => entry.type === 'output' && entry.data.delta?.includes('Network address inventory is blocked.')));
+  } finally { await app.close(); }
+});
+
+test('missing interface positions are blocked before totals or literal filtering can hide them', async () => {
+  const sparse = new Array(2); sparse[0] = evidence().interfaces[0];
+  for (const interfaces of [new Array(1), sparse, [undefined], [null]]) {
+    for (const filter of ['', '[wired]', 'does not match']) {
+      const result = await inspectNetworking(filter, async () => evidence({ interfaces }));
+      assert.equal(result.status, 'blocked'); assert.deepEqual(result.interfaces, []);
+      for (const key of ['totalInterfaceCount', 'totalAddressCount', 'matchedInterfaceCount', 'matchedAddressCount']) assert.equal(result[key], undefined);
+      assert.match(networkReport(result), /incomplete interface readings/);
+    }
+  }
+});
+
+test('missing address positions cannot inflate matched counts, disappear behind filters or crash a report', async () => {
+  const sparse = new Array(2); sparse[0] = ipv4;
+  for (const addresses of [new Array(1), sparse, [undefined], [null]]) {
+    for (const filter of ['', 'Fixture', '192.0.2.', 'does not match']) {
+      const result = await inspectNetworking(filter, async () => evidence({ interfaces: [{ name: 'Fixture', addresses }] }));
+      assert.equal(result.status, 'blocked'); assert.deepEqual(result.interfaces, []);
+      for (const key of ['totalInterfaceCount', 'totalAddressCount', 'matchedInterfaceCount', 'matchedAddressCount']) assert.equal(result[key], undefined);
+      assert.match(networkReport(result), /incomplete address readings/);
+    }
+  }
+});
+
+test('the native collector rejects missing address positions and unsupported arrays without returning partial success', async () => {
+  const sparse = new Array(2); sparse[0] = ipv4;
+  for (const addresses of [new Array(1), sparse, [undefined], [null], [[]], null, {}, new Array(129)]) {
+    let calls = 0;
+    const result = await inspectNetworking('', () => collectNetworking({ readInterfaces: (...args) => {
+      calls++; assert.deepEqual(args, []); return { Fixture: addresses };
+    } }));
+    assert.equal(calls, 1); assert.equal(result.status, 'blocked'); assert.deepEqual(result.interfaces, []);
+    assert.equal(result.totalAddressCount, undefined); assert.match(networkReport(result), /network address API returned/);
+  }
+  await assert.rejects(collectNetworking({ readInterfaces: () => Object.fromEntries(Array.from({ length: 513 }, (_, index) => ['Fixture-' + index, []])) }), /too many interface readings/);
+});
+
+test('network success and failure flags must agree before any address counts or provider diagnostics are accepted', async () => {
+  const failed = { stage: 'Local address API', message: 'Provider failed. Bearer fixture-secret' };
+  const invalid = [evidence({ status: 'unknown' }), evidence({ status: undefined }), evidence({ error: undefined }), evidence({ error: failed }),
+    evidence({ status: 'blocked', error: failed }), evidence({ status: 'blocked', error: null, interfaces: [] }),
+    evidence({ status: 'blocked', error: { ...failed, stage: ' ' }, interfaces: [] }),
+    evidence({ status: 'blocked', error: { ...failed, message: '' }, interfaces: [] })];
+  for (const raw of invalid) {
+    const result = await inspectNetworking('does not match', async () => raw);
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.interfaces, []);
+    assert.equal(result.totalAddressCount, undefined); assert.doesNotMatch(networkReport(result), /fixture-secret|No assigned addresses matched/);
+  }
+  const result = await inspectNetworking('', async () => evidence({ status: 'blocked', error: failed, interfaces: [] }));
+  assert.equal(result.status, 'blocked'); assert.equal(result.error.stage, failed.stage);
+  assert.match(networkReport(result), /Provider failed/); assert.doesNotMatch(networkReport(result), /fixture-secret/);
+  for (const failure of [null, undefined]) {
+    const result = await inspectNetworking('', async () => { throw failure; });
+    assert.equal(result.status, 'blocked'); assert.match(networkReport(result), /address query did not succeed/);
+  }
+});
+
+test('actual empty inventories, false flags and zero or unreported scopes stay distinct from missing rows', async () => {
+  for (const interfaces of [[], [{ name: 'Fixture', addresses: [] }]]) {
+    const result = await inspectNetworking('', async () => evidence({ interfaces }));
+    assert.equal(result.status, 'passed'); assert.equal(result.totalInterfaceCount, 0); assert.equal(result.totalAddressCount, 0);
+    assert.match(networkReport(result), /No assigned interface addresses were reported/);
+  }
+  const result = await inspectNetworking('', () => collectNetworking({ readInterfaces: () => ({
+    Fixture: [{ ...ipv6, scopeid: 0 }, { ...ipv6, address: 'fe80::2', scopeid: undefined }]
+  }) }));
+  assert.equal(result.status, 'passed'); assert.equal(result.matchedAddressCount, 2);
+  assert.deepEqual(result.interfaces[0].addresses.map(address => [address.internal, address.scopeId]), [[false, 0], [false, null]]);
+  assert.match(networkReport(result), /IPv6 scope ID: 0/); assert.match(networkReport(result), /IPv6 scope ID: Unreported/);
+});
+
+test('missing network readings save a blocked chat report across restart and permit a fresh read', async () => {
+  const sparse = new Array(2); sparse[0] = ipv4;
+  const fake = new FakeCodex();
+  let app = await createApplication({ port: 0, codex: fake, autostart: false,
+    networkCollector: async () => evidence({ interfaces: [{ name: 'Fixture', addresses: sparse }] }) });
+  try {
+    const before = fake.calls.length, result = await app.actions['agent/send']({ text: 'show networking matching does not match' });
+    assert.equal(result.status, 'blocked'); assert.equal(app.snapshot().systemTool, null); assert.equal(fake.calls.length, before);
+    const output = app.snapshot().journal.find(entry => entry.type === 'output' && entry.data.delta?.includes('incomplete address readings'));
+    assert.ok(output); assert.doesNotMatch(output.data.delta, /assigned addresses read|No assigned addresses matched/);
+    await app.close();
+    const next = new FakeCodex();
+    app = await createApplication({ port: 0, codex: next, autostart: false, networkCollector: async () => evidence() });
+    assert.ok(app.snapshot().journal.some(entry => entry.data?.itemId === output.data.itemId));
+    const prior = next.calls.length, recovered = await app.actions['agent/send']({ text: 'show networking' });
+    assert.equal(recovered.status, 'passed'); assert.equal(recovered.totalAddressCount, 3);
+    assert.equal(next.calls.length, prior); assert.equal(app.snapshot().systemTool, null);
   } finally { await app.close(); }
 });
 

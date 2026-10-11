@@ -19,23 +19,38 @@ export async function collectNetworking({ readInterfaces = os.networkInterfaces 
   if (typeof readInterfaces !== 'function') throw new Error('The local network address API is required.');
   const readings = await readInterfaces();
   if (!readings || typeof readings !== 'object' || Array.isArray(readings)) throw new Error('The network address API returned unsupported readings.');
-  return { version: 1, kind: 'networking', observedAt: new Date().toISOString(),
+  const entries = Object.entries(readings);
+  if (entries.length > 512) throw new Error('The network address API returned too many interface readings.');
+  return { version: 1, kind: 'networking', status: 'passed', error: null, observedAt: new Date().toISOString(),
     system: { platform: process.platform, release: os.release(), runtimeArchitecture: process.arch },
-    interfaces: Object.entries(readings).map(([name, addresses]) => ({ name, addresses: addresses.map(address => ({
-      address: address.address, family: address.family, netmask: address.netmask, internal: address.internal,
-      scopeId: address.family === 'IPv6' ? address.scopeid ?? null : null
-    })) })) };
+    interfaces: entries.map(([name, addresses]) => {
+      if (!Array.isArray(addresses) || addresses.length > 128) throw new Error('The network address API returned unsupported address readings.');
+      return { name, addresses: Array.from(addresses, address => {
+        if (!address || typeof address !== 'object' || Array.isArray(address)) throw new Error('The network address API returned incomplete address readings.');
+        return { address: address.address, family: address.family, netmask: address.netmask, internal: address.internal,
+          scopeId: address.family === 'IPv6' ? address.scopeid ?? null : null };
+      }) };
+    }) };
 }
 
 export async function inspectNetworking(filter = '', collect = collectNetworking) {
   validateFilter(filter);
   try {
     const raw = await collect();
-    if (raw?.version !== 1 || raw.kind !== 'networking' || typeof raw.observedAt !== 'string' || !Number.isFinite(Date.parse(raw.observedAt)) || !raw.system
-      || ['platform', 'release', 'runtimeArchitecture'].some(key => typeof raw.system[key] !== 'string')
+    if (raw?.version !== 1 || raw.kind !== 'networking' || !['passed', 'blocked'].includes(raw.status)
+      || typeof raw.observedAt !== 'string' || raw.observedAt.length > 40 || !Number.isFinite(Date.parse(raw.observedAt)) || !raw.system
+      || ['platform', 'release', 'runtimeArchitecture'].some(key => typeof raw.system[key] !== 'string' || raw.system[key].length > 128)
       || !Array.isArray(raw.interfaces) || raw.interfaces.length > 512) throw new Error('The network collector returned unsupported evidence.');
+    if (raw.status === 'blocked') {
+      if (raw.interfaces.length || typeof raw.error?.stage !== 'string' || !raw.error.stage.trim()
+        || typeof raw.error.message !== 'string' || !raw.error.message.trim()) throw new Error('The network collector returned ambiguous failure evidence.');
+      return { status: 'blocked', observedAt: raw.observedAt, interfaces: [],
+        error: { stage: text(raw.error.stage), message: text(raw.error.message) } };
+    }
+    if (raw.error !== null) throw new Error('The network collector returned conflicting failure evidence.');
     const names = new Set(); let totalAddressCount = 0;
-    const all = raw.interfaces.map(iface => {
+    // Validate every interface and address before filtering; array holes are missing readings.
+    const all = Array.from(raw.interfaces, iface => {
       if (typeof iface?.name !== 'string' || !iface.name.trim() || iface.name.length > 256 || !Array.isArray(iface.addresses) || iface.addresses.length > 128) {
         throw new Error('The network collector returned incomplete interface readings.');
       }
@@ -43,7 +58,7 @@ export async function inspectNetworking(filter = '', collect = collectNetworking
       if (names.has(name.toLowerCase())) throw new Error('The network collector returned duplicate interface names.');
       names.add(name.toLowerCase());
       const identities = new Set();
-      const addresses = iface.addresses.map(reading => {
+      const addresses = Array.from(iface.addresses, reading => {
         const familyNumber = reading?.family === 'IPv4' ? 4 : reading?.family === 'IPv6' ? 6 : 0;
         if (!familyNumber || typeof reading.address !== 'string' || isIP(reading.address) !== familyNumber
           || typeof reading.netmask !== 'string' || isIP(reading.netmask) !== familyNumber || typeof reading.internal !== 'boolean'
