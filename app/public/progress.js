@@ -5,6 +5,7 @@ export function describeProgress(state, connected = true) {
   if (state.systemTool?.kind === 'services') return { phase: 'checking', title: 'Reading Windows services', detail: 'Collecting live service status and startup modes for this OS session.', active: true };
   if (state.systemTool?.kind === 'devices') return { phase: 'checking', title: 'Reading Windows devices', detail: 'Collecting reported device status and problem codes for this OS session.', active: true };
   if (state.systemTool?.kind === 'storage') return { phase: 'checking', title: 'Reading workspace storage', detail: 'Collecting live filesystem capacity for the selected workspace.', active: true };
+  if (state.systemTool?.kind === 'drives') return { phase: 'checking', title: 'Reading Windows logical drives', detail: 'Collecting reported drive letters, types and capacity for this OS session.', active: true };
   if (state.systemTool?.kind === 'networking') return { phase: 'checking', title: 'Reading network addresses', detail: 'Collecting assigned interface addresses for this OS session.', active: true };
   if (state.systemTool?.kind === 'files') return { phase: 'checking', title: 'Reading workspace files', detail: 'Collecting root entry names, types, sizes and modification times.', active: true };
   if (state.systemTool?.kind === 'logs') return { phase: 'checking', title: 'Reading Windows event logs', detail: 'Collecting bounded System and Application event metadata for this OS session.', active: true };

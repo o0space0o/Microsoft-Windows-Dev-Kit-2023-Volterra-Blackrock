@@ -39,6 +39,35 @@ test('automatic work is reviewed, checked and published before advancing; saved 
   assert.deepEqual(resumed.calls, ['work:two']);
   resumed.runner.close();
 });
+test('an authorization wake before startup cannot run the default task before the saved queue is loaded', async () => {
+  const saved = controller('before-load'); saved.runner.saved.task = 1; await saved.runner.persist();
+  const next = controller('before-load');
+  try {
+    await next.runner.tick(); assert.deepEqual(next.calls, []);
+    await next.runner.start(); assert.deepEqual(next.calls, ['work:two']);
+    assert.equal(next.runner.saved.task, 1);
+  } finally { next.runner.close(); }
+});
+
+for (const phase of ['publishing', 'reviewing-update']) {
+  test(`restart during ${phase} reloads the saved outcome and repeats source checks before publication`, async () => {
+    const saved = controller(`restart-${phase}`);
+    saved.runner.saved = { ...saved.runner.saved, task: 1, phase, reviewPassed: false,
+      pendingOutcome: { status: 'progress', summary: 'Retained source candidate' } };
+    await saved.runner.persist();
+    const next = controller(`restart-${phase}`);
+    try {
+      await next.runner.start();
+      assert.deepEqual(next.calls, ['review']); assert.equal(next.runner.saved.phase, 'reviewing');
+      assert.equal(next.runner.saved.pendingOutcome.summary, 'Retained source candidate');
+      await next.runner.completed('completed', { status: 'complete', summary: 'Independent review passed after restart' });
+      assert.deepEqual(next.calls, ['review', 'checks', 'push']);
+      assert.equal(next.runner.saved.task, 1); assert.equal(next.runner.saved.phase, 'idle');
+      assert.equal(next.runner.saved.pendingOutcome, null);
+    } finally { next.runner.close(); }
+  });
+}
+
 test('failed independent checks retain the task and prevent any main push', async () => {
   const { runner, calls } = controller('failed', { checkpoint: async () => { throw new Error('A required test failed'); } });
   await runner.start();

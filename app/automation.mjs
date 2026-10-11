@@ -10,24 +10,27 @@ export const outcomeSchema = {
   required: ['status', 'summary']
 };
 
+const inFlightPhases = ['starting', 'working', 'reviewing', 'reviewing-update', 'checking', 'publishing'];
+
 // Persist a bounded queue, rather than asking the model to run forever without evidence.
 export class Automation {
   constructor({ config, repository, hooks, directory = stateDirectory, enabled = false }) {
     this.config = config; this.repository = repository || new Repository({ config }); this.hooks = hooks;
     this.file = path.join(directory, 'automation-state.json'); this.enabled = enabled;
     this.saved = { version: 1, enabled, paused: false, phase: 'idle', task: 0, failures: 0, pendingOutcome: null, reviewPassed: false, lastCommit: null, lastError: null };
-    this.persistence = Promise.resolve(); this.busy = false;
+    this.persistence = Promise.resolve(); this.busy = false; this.loaded = false;
   }
   async load() {
     try { this.saved = { ...this.saved, ...JSON.parse(await fs.readFile(this.file, 'utf8')) }; }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
     // A turn interrupted by power loss is resumed from the saved thread and task.
-    if (['working', 'reviewing', 'checking', 'starting'].includes(this.saved.phase)) this.saved.phase = 'idle';
+    if (inFlightPhases.includes(this.saved.phase)) this.saved.phase = 'idle';
     if (this.saved.phase === 'restart-pending') {
       try { const update = JSON.parse(await fs.readFile(path.join(path.dirname(this.file), 'last-update.json'), 'utf8')); if (update.phase === 'confirmed' && update.commit === this.saved.comparison?.latest) this.saved.phase = 'idle'; } catch {}
       try { const update = JSON.parse(await fs.readFile(path.join(path.dirname(this.file), 'pending-update.json'), 'utf8')); if (update.phase === 'rolled-back') { this.saved.phase = 'blocked'; this.saved.lastError = 'The helper update failed its startup health check and was rolled back. Previous files are retained.'; } } catch {}
     }
     await this.persist();
+    this.loaded = true;
   }
   snapshot() { return { ...this.saved, repository: this.config.repository, branch: 'main', taskTitle: this.config.tasks[this.saved.task]?.title || 'Maintenance', tasksRemaining: Math.max(0, this.config.tasks.length - this.saved.task) }; }
   persist() {
@@ -48,7 +51,8 @@ export class Automation {
     await this.persist(); this.hooks.notice?.(`Automation needs attention: ${error.message}`);
   }
   async tick() {
-    if (this.busy || !this.saved.enabled || this.saved.paused || this.hooks.active() || ['blocked', 'restart-pending', 'reviewing', 'working'].includes(this.saved.phase)) return;
+    if (!this.loaded || this.busy || !this.saved.enabled || this.saved.paused || this.hooks.active()
+      || inFlightPhases.includes(this.saved.phase) || ['blocked', 'restart-pending'].includes(this.saved.phase)) return;
     if (!this.hooks.connected()) { this.saved.phase = 'waiting-for-sign-in'; await this.persist(); return; }
     this.busy = true;
     try {

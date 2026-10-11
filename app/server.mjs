@@ -20,9 +20,10 @@ import { processQuery, collectProcesses, inspectProcesses, processReport } from 
 import { dnsQuery, collectDns, inspectDns, dnsReport } from './dns-tools.mjs';
 import { memoryQuery, collectMemory, inspectMemory, memoryReport } from './memory-tools.mjs';
 import { uptimeQuery, collectUptime, inspectUptime, uptimeReport } from './uptime-tools.mjs';
+import { driveQuery, collectDrives, inspectDrives, driveReport } from './drive-tools.mjs';
 import { githubBrowserCommand } from '../scripts/Open-Browser.mjs';
 
-export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices, storageCollector = collectStorage, networkCollector = collectNetworking, browserOpener = openBrowser, fileCollector = collectFiles, logCollector = collectLogs, maintenanceCollector = collectMaintenance, processCollector = collectProcesses, dnsCollector = collectDns, memoryCollector = collectMemory, uptimeCollector = collectUptime } = {}) {
+export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices, storageCollector = collectStorage, networkCollector = collectNetworking, browserOpener = openBrowser, fileCollector = collectFiles, logCollector = collectLogs, maintenanceCollector = collectMaintenance, processCollector = collectProcesses, dnsCollector = collectDns, memoryCollector = collectMemory, uptimeCollector = collectUptime, driveCollector = collectDrives } = {}) {
   const state = await readState();
   const defaultFolder = await fs.realpath(process.env.VOLTERRA_OS_ROOT || root);
   if (!state.selected || (process.env.VOLTERRA_OS_ROOT && state.selected !== defaultFolder)) {
@@ -39,6 +40,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
   const session = randomBytes(32).toString('hex');
   let origin, sessionCookieName, account = null, activeTurn = null, loadedThread = null, paused = false, pauseRequested = false, restartRequired = false, github = null, runtimeToken = null, runtimeStart, automation, runtimeReady = false;
   let progressPhase = null, progressSince = new Date().toISOString(), lastActivityAt = journal.at(-1)?.time || null, connectionsChecked = false;
+  let initialContinuation = null;
   const finalMessages = new Map();
   let systemTool = null;
   const selected = () => state.selected && state.projects[state.selected];
@@ -46,6 +48,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     { kind: 'services', query: serviceQuery, inspect: query => inspectServices(query.filter, serviceCollector), report: serviceReport, script: 'Get-ServiceInventory.ps1' },
     { kind: 'devices', query: deviceQuery, inspect: query => inspectDevices(query.filter, deviceCollector), report: deviceReport, script: 'Get-DeviceInventory.ps1' },
     { kind: 'storage', query: storageQuery, inspect: () => inspectStorage(selected()?.path || defaultFolder, storageCollector), report: storageReport, notice: 'Reading filesystem capacity for the selected workspace.' },
+    { kind: 'drives', query: driveQuery, inspect: query => inspectDrives(query.filter, driveCollector), report: driveReport, script: 'Get-DriveInventory.ps1' },
     { kind: 'networking', query: networkQuery, inspect: query => inspectNetworking(query.filter, networkCollector), report: networkReport, notice: 'Reading assigned interface addresses for this OS session.' },
     { kind: 'files', query: fileQuery, inspect: query => inspectFiles(selected()?.path || defaultFolder, query.filter, fileCollector), report: fileReport, notice: 'Reading metadata for the selected workspace root.' },
     { kind: 'logs', query: logQuery, inspect: query => inspectLogs(query.filter, logCollector), report: logReport, script: 'Get-LogInventory.ps1' },
@@ -119,10 +122,18 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     return account;
   }
   async function continueInitialVision() {
-    if (automation?.saved.enabled) { await automation.resume(); return; }
-    if (!state.autoContinueVision || activeTurn || !account) return;
-    await actions['agent/vision']();
-    state.autoContinueVision = false; await saveState(state);
+    if (activeTurn || (automation?.saved.enabled && automation.saved.paused)) return;
+    if (initialContinuation) return initialContinuation;
+    // Repeated account notifications share startup without resetting an in-flight queue.
+    initialContinuation = (async () => {
+      // Authorization wakes a ready queue; only an explicit resume clears saved stops.
+      if (automation?.saved.enabled) { await automation.tick(); return; }
+      if (!state.autoContinueVision || !account) return;
+      await actions['agent/vision']();
+      state.autoContinueVision = false; await saveState(state);
+    })();
+    try { await initialContinuation; }
+    finally { initialContinuation = null; }
   }
   async function ensureRuntime(mode = state.authMode) {
     if (runtimeStart) await runtimeStart;
@@ -280,7 +291,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
         try { github = code === 0 ? { login: await run(executable('gh'), ['api', 'user', '--jq', '.login']) } : null; if (code !== 0) event('error', 'GitHub sign-in did not complete.'); }
         catch (error) { event('error', error.message); github = null; }
         publish();
-        if (github?.login && automation?.saved.enabled) await automation.resume();
+        if (github?.login && automation?.saved.enabled) await automation.tick();
       });
       return { status: 'Follow the GitHub browser sign-in instructions in the journal' };
     },
