@@ -26,16 +26,22 @@ export async function inspectDevices(filter = '', collect = collectDevices) {
   try {
     const raw = await collect();
     if (raw?.version !== 1 || raw.kind !== 'devices' || !['passed', 'blocked'].includes(raw.status)
-      || typeof raw.observedAt !== 'string' || !Number.isFinite(Date.parse(raw.observedAt)) || !raw.system
-      || ['edition', 'build', 'architecture'].some(key => typeof raw.system[key] !== 'string')
+      || typeof raw.observedAt !== 'string' || raw.observedAt.length > 40 || !Number.isFinite(Date.parse(raw.observedAt)) || !raw.system
+      || ['edition', 'build', 'architecture'].some(key => typeof raw.system[key] !== 'string' || raw.system[key].length > 128)
       || !Array.isArray(raw.devices) || raw.devices.length > 4096) throw new Error('The device collector returned unsupported evidence.');
     const system = { edition: text(raw.system.edition || 'Unknown', 128), build: text(raw.system.build || 'Unknown', 64), architecture: text(raw.system.architecture || 'Unknown', 64) };
     const environment = system.edition === 'WinVOS' ? 'Validation OS session; VM or physical identity unverified'
       : system.edition === 'Unknown' ? 'Windows session; OS edition unverified' : 'Windows session; VM or physical identity unverified';
-    if (raw.status === 'blocked') return { status: 'blocked', observedAt: raw.observedAt, system, environment, filter: text(filter, 256), devices: [],
-      error: { stage: text(raw.error?.stage || 'Device enumeration'), message: text(raw.error?.message || 'Device enumeration did not succeed.') } };
+    if (raw.status === 'blocked') {
+      if (raw.devices.length || typeof raw.error?.stage !== 'string' || !raw.error.stage.trim()
+        || typeof raw.error.message !== 'string' || !raw.error.message.trim()) throw new Error('The device collector returned ambiguous failure evidence.');
+      return { status: 'blocked', observedAt: raw.observedAt, system, environment, filter: text(filter, 256), devices: [],
+        error: { stage: text(raw.error.stage), message: text(raw.error.message) } };
+    }
+    if (raw.error !== null) throw new Error('The device collector returned conflicting failure evidence.');
     const identities = new Set();
-    const all = raw.devices.map(device => {
+    // Validate every position so missing rows cannot inflate the problem-code totals.
+    const all = Array.from(raw.devices, device => {
       if (typeof device?.instanceId !== 'string' || !device.instanceId.trim() || device.instanceId.length > 512
         || /[\u0000-\u001f\u007f]/.test(device.instanceId)
         || ['name', 'deviceClass', 'status'].some(key => device[key] !== null && typeof device[key] !== 'string')
@@ -57,7 +63,7 @@ export async function inspectDevices(filter = '', collect = collectDevices) {
     return { status: 'passed', observedAt: raw.observedAt, system, environment, filter: text(filter, 256), source: 'Local Windows Win32_PnPEntity provider',
       totalCount: all.length, matchedCount: devices.length, counts, devices };
   } catch (error) {
-    return { status: 'blocked', filter: text(filter, 256), devices: [], error: { stage: 'Device inventory', message: text(error.message) } };
+    return { status: 'blocked', filter: text(filter, 256), devices: [], error: { stage: 'Device inventory', message: text(error?.message || 'The device query did not succeed.') } };
   }
 }
 

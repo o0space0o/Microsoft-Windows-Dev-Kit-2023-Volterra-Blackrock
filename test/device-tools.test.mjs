@@ -15,7 +15,7 @@ const evidence = (patch = {}) => ({ version: 1, kind: 'devices', status: 'passed
     { instanceId: 'ROOT\\FIXTURE_ZULU', name: 'Literal [match] fixture', deviceClass: 'Example', status: 'Error', present: false, problemCode: 22 },
     { instanceId: 'ROOT\\FIXTURE_ALPHA', name: 'Example device', deviceClass: 'System', status: 'OK', present: true, problemCode: 0 },
     { instanceId: 'ROOT\\FIXTURE_BETA', name: null, deviceClass: null, status: null, present: null, problemCode: null }
-  ], ...patch });
+  ], error: null, ...patch });
 
 class FakeCodex extends EventEmitter {
   calls = [];
@@ -100,8 +100,8 @@ test('malformed and duplicate device readings fail closed instead of becoming he
   assert.equal(empty.totalCount, 0); assert.deepEqual(empty.counts, { codeZero: 0, codeNonzero: 0, codeUnreported: 0 });
 });
 
-test('partial provider failure and missing APIs produce sanitized blocked diagnostics', async () => {
-  const denied = await inspectDevices('', async () => evidence({ status: 'blocked', error: { stage: 'Device enumeration', message: 'Provider failed. Bearer fixture-secret' } }));
+test('provider failure and missing APIs produce sanitized blocked diagnostics', async () => {
+  const denied = await inspectDevices('', async () => evidence({ status: 'blocked', devices: [], error: { stage: 'Device enumeration', message: 'Provider failed. Bearer fixture-secret' } }));
   assert.equal(denied.status, 'blocked'); assert.deepEqual(denied.devices, []);
   assert.equal(denied.error.stage, 'Device enumeration'); assert.match(denied.error.message, /Provider failed/);
   assert.doesNotMatch(denied.error.message, /fixture-secret/);
@@ -109,6 +109,63 @@ test('partial provider failure and missing APIs produce sanitized blocked diagno
   assert.equal(unavailable.status, 'blocked'); assert.match(unavailable.error.message, /unavailable/);
   const sanitized = await inspectDevices('', async () => evidence({ devices: [{ ...evidence().devices[0], name: 'Label\nBearer fixture-secret' }] }));
   assert.doesNotMatch(deviceReport(sanitized), /fixture-secret/); assert.doesNotMatch(sanitized.devices[0].name, /\n/);
+});
+
+test('sparse device rows fail closed without inventing counts or omitting unknown readings', async () => {
+  const partial = Array(3); partial[1] = evidence().devices[0];
+  for (const devices of [Array(2), partial, [evidence().devices[0], undefined], [null]]) {
+    const result = await inspectDevices('', async () => evidence({ devices }));
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.devices, []);
+    assert.equal(result.totalCount, undefined); assert.equal(result.counts, undefined); assert.match(deviceReport(result), /blocked/);
+  }
+  for (const devices of [[], evidence().devices]) {
+    const result = await inspectDevices('', async () => evidence({ devices }));
+    assert.equal(result.status, 'passed'); assert.equal(result.totalCount, devices.length);
+    assert.equal(Object.values(result.counts).reduce((total, value) => total + value, 0), result.totalCount);
+  }
+});
+
+test('device success and blocked status require consistent explicit provider evidence', async () => {
+  for (const error of [undefined, false, {}, { stage: 'Device enumeration', message: 'Provider failed' }]) {
+    const result = await inspectDevices('', async () => evidence({ error }));
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.devices, []);
+    assert.match(result.error.message, /conflicting failure evidence/);
+  }
+  const blocked = { status: 'blocked', devices: [], error: { stage: 'Device enumeration', message: 'Access denied' } };
+  const malformed = [evidence({ ...blocked, devices: evidence().devices }),
+    ...[null, {}, { stage: '', message: 'Denied' }, { stage: 'Read', message: ' ' }, { stage: 1, message: 'Denied' }, { stage: 'Read', message: {} }]
+      .map(error => evidence({ ...blocked, error }))];
+  for (const raw of malformed) {
+    const result = await inspectDevices('', async () => raw);
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.devices, []); assert.equal(result.totalCount, undefined);
+    assert.match(result.error.message, /ambiguous failure evidence/);
+  }
+  const result = await inspectDevices('sk-fixture-filter', async () => evidence(blocked));
+  assert.equal(result.error.stage, 'Device enumeration'); assert.equal(result.error.message, 'Access denied');
+  assert.doesNotMatch(JSON.stringify(result), /fixture-filter/);
+});
+
+test('null and non-Error device collector exceptions remain blocked and retain safe diagnostics', async () => {
+  for (const failure of [null, undefined, '', 'Access denied', 123, {}]) {
+    const result = await inspectDevices('', async () => { throw failure; });
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.devices, []);
+    assert.equal(result.error.stage, 'Device inventory'); assert.match(deviceReport(result), /device query did not succeed/);
+  }
+  const denied = await inspectDevices('', async () => { throw { message: 'Read denied. Bearer fixture-secret' }; });
+  assert.match(denied.error.message, /Read denied/); assert.doesNotMatch(denied.error.message, /fixture-secret/);
+});
+
+test('oversized device session metadata is blocked while optional readings keep their zero and null values', async () => {
+  for (const key of ['edition', 'build', 'architecture']) {
+    const result = await inspectDevices('', async () => evidence({ system: { ...evidence().system, [key]: 'x'.repeat(129) } }));
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.devices, []);
+  }
+  assert.equal((await inspectDevices('', async () => evidence({ observedAt: 'x'.repeat(41) }))).status, 'blocked');
+  const result = await inspectDevices('', async () => evidence({ system: { edition: 'x'.repeat(128), build: 'x'.repeat(128), architecture: 'x'.repeat(128) } }));
+  assert.equal(result.status, 'passed'); assert.deepEqual(result.counts, { codeZero: 1, codeNonzero: 1, codeUnreported: 1 });
+  assert.equal(result.devices.find(row => row.instanceId.endsWith('ALPHA')).problemCode, 0);
+  assert.equal(result.devices.find(row => row.instanceId.endsWith('ZULU')).present, false);
+  assert.equal(result.devices.find(row => row.instanceId.endsWith('BETA')).problemCode, null);
 });
 
 test('the conversation bounds long inventory output while the authenticated result retains matches', async () => {
@@ -178,6 +235,27 @@ test('a denied device collector saves a blocked diagnostic and clears transient 
     assert.equal(result.status, 'blocked'); assert.deepEqual(result.devices, []);
     assert.equal(app.snapshot().systemTool, null);
     assert.ok(app.snapshot().journal.some(entry => entry.type === 'output' && entry.data.delta?.includes('blocked. Device inventory: Script execution is disabled by policy.')));
+  } finally { await app.close(); }
+});
+
+test('device collector anomalies save blocked output, clear checking and recover for a valid subsequent read', async () => {
+  let read = 0;
+  const app = await createApplication({ port: 0, codex: new FakeCodex(), autostart: false, deviceCollector: async () => {
+    if (++read === 1) throw null;
+    if (read === 2) return evidence({ devices: Array(2) });
+    if (read === 3) return evidence({ error: { stage: 'Device enumeration', message: 'Provider failed' } });
+    return evidence();
+  } });
+  try {
+    const blockedOutputs = () => app.snapshot().journal.filter(entry => entry.type === 'output' && entry.data.delta?.startsWith('Device inventory is blocked.')).length;
+    const before = blockedOutputs();
+    for (let index = 0; index < 3; index++) {
+      const result = await app.actions['agent/send']({ text: 'show devices' });
+      assert.equal(result.status, 'blocked'); assert.equal(app.snapshot().systemTool, null);
+    }
+    assert.equal(blockedOutputs() - before, 3);
+    const result = await app.actions['agent/send']({ text: 'show devices' });
+    assert.equal(result.status, 'passed'); assert.equal(result.totalCount, 3); assert.equal(app.snapshot().systemTool, null);
   } finally { await app.close(); }
 });
 
