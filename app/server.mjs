@@ -12,8 +12,9 @@ import { Automation, outcomeSchema, readAutomationConfig } from './automation.mj
 import { serviceQuery, collectServices, inspectServices, serviceReport } from './service-tools.mjs';
 import { deviceQuery, collectDevices, inspectDevices, deviceReport } from './device-tools.mjs';
 import { storageQuery, collectStorage, inspectStorage, storageReport } from './storage-tools.mjs';
+import { networkQuery, collectNetworking, inspectNetworking, networkReport } from './network-tools.mjs';
 
-export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices, storageCollector = collectStorage } = {}) {
+export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices, storageCollector = collectStorage, networkCollector = collectNetworking } = {}) {
   const state = await readState();
   const defaultFolder = await fs.realpath(process.env.VOLTERRA_OS_ROOT || root);
   if (!state.selected || (process.env.VOLTERRA_OS_ROOT && state.selected !== defaultFolder)) {
@@ -33,6 +34,12 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
   const finalMessages = new Map();
   let systemTool = null;
   const selected = () => state.selected && state.projects[state.selected];
+  const inventoryTools = [
+    { kind: 'services', query: serviceQuery, inspect: query => inspectServices(query.filter, serviceCollector), report: serviceReport, script: 'Get-ServiceInventory.ps1' },
+    { kind: 'devices', query: deviceQuery, inspect: query => inspectDevices(query.filter, deviceCollector), report: deviceReport, script: 'Get-DeviceInventory.ps1' },
+    { kind: 'storage', query: storageQuery, inspect: () => inspectStorage(selected()?.path || defaultFolder, storageCollector), report: storageReport, notice: 'Reading filesystem capacity for the selected workspace.' },
+    { kind: 'networking', query: networkQuery, inspect: query => inspectNetworking(query.filter, networkCollector), report: networkReport, notice: 'Reading assigned interface addresses for this OS session.' }
+  ];
   function event(type, data) {
     const entry = JSON.parse(redact(JSON.stringify({ type, data, time: new Date().toISOString() })));
     if (type !== 'state') {
@@ -169,24 +176,21 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     'project/resume': async () => { const project = await ensureThread(); return { project }; },
     'agent/send': async body => {
       if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 100_000) throw new Error('Enter a message of up to 100,000 characters.');
-      const service = serviceQuery(body.text), device = service ? null : deviceQuery(body.text);
-      const storage = service || device ? null : storageQuery(body.text);
-      const query = service || device || storage;
-      if (query) {
+      let tool, query;
+      for (const candidate of inventoryTools) {
+        const parsed = candidate.query(body.text);
+        if (parsed) { tool = candidate; query = parsed; break; }
+      }
+      if (tool) {
         if (systemTool) throw new Error('A system inventory is already running.');
-        const kind = service ? 'services' : device ? 'devices' : 'storage';
         event('user', body.text);
-        systemTool = { kind, since: new Date().toISOString() }; publish();
-        if (storage) event('notice', 'Reading filesystem capacity for the selected workspace.');
-        else {
-          const script = service ? 'Get-ServiceInventory.ps1' : 'Get-DeviceInventory.ps1';
-          event('command', { command: powershell ? `${powershell} -NoProfile -NonInteractive -File "${path.join(root, 'scripts', script)}"` : `Windows ${kind} collector unavailable on this platform`, cwd: root });
-        }
+        systemTool = { kind: tool.kind, since: new Date().toISOString() }; publish();
+        if (tool.script) event('command', { command: powershell ? `${powershell} -NoProfile -NonInteractive -File "${path.join(root, 'scripts', tool.script)}"` : `Windows ${tool.kind} collector unavailable on this platform`, cwd: root });
+        else event('notice', tool.notice);
         try {
-          const result = service ? await inspectServices(query.filter, serviceCollector) : device ? await inspectDevices(query.filter, deviceCollector)
-            : await inspectStorage(selected()?.path || defaultFolder, storageCollector);
-          event('output', { itemId: `${kind}-${randomBytes(8).toString('hex')}`, delta: service ? serviceReport(result) : device ? deviceReport(result) : storageReport(result) });
-          return { tool: kind, ...result };
+          const result = await tool.inspect(query);
+          event('output', { itemId: `${tool.kind}-${randomBytes(8).toString('hex')}`, delta: tool.report(result) });
+          return { tool: tool.kind, ...result };
         } finally { systemTool = null; publish(); }
       }
       const project = await ensureThread();
