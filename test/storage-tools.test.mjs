@@ -10,7 +10,7 @@ process.env.VOLTERRA_STATE_DIR = path.join(directory, 'state');
 const { storageQuery, collectStorage, inspectStorage, storageReport } = await import('../app/storage-tools.mjs');
 const { createApplication } = await import('../app/server.mjs');
 const { describeProgress } = await import('../app/public/progress.js');
-const evidence = (workspace = directory, patch = {}) => ({ version: 1, kind: 'storage', requestedWorkspace: workspace, workspace,
+const evidence = (workspace = directory, patch = {}) => ({ version: 1, kind: 'storage', status: 'passed', error: null, requestedWorkspace: workspace, workspace,
   observedAt: '2026-10-11T17:33:00.000Z', system: { platform: 'win32', release: 'fixture', runtimeArchitecture: 'arm64' },
   blocks: { size: '4096', total: '100', free: '30', available: '20' }, ...patch });
 
@@ -40,6 +40,7 @@ test('the collector reads a canonical directory using BigInt statistics and reje
     statfs: async (requested, options) => { calls.push(['statfs', requested, options]); return { bsize: 4096n, blocks: 100n, bfree: 30n, bavail: 20n }; }
   };
   const result = await collectStorage(directory, { filesystem });
+  assert.equal(result.status, 'passed'); assert.equal(result.error, null);
   assert.equal(result.requestedWorkspace, directory); assert.equal(result.workspace, canonical);
   assert.deepEqual(result.blocks, evidence().blocks); assert.ok(Number.isFinite(Date.parse(result.observedAt)));
   assert.deepEqual(calls.map(call => call[0]), ['realpath', 'stat', 'statfs', 'stat', 'realpath']);
@@ -68,8 +69,9 @@ test('capacity arithmetic is exact beyond Number precision and keeps available, 
 });
 
 test('missing, malformed, inconsistent and mismatched workspace evidence becomes blocked without invented capacity', async () => {
-  for (const raw of [null, evidence(directory, { kind: 'devices' }), evidence(directory, { requestedWorkspace: path.dirname(directory) }),
-    evidence(directory, { workspace: 'relative' }), evidence(directory, { observedAt: 'invalid' }),
+  for (const raw of [null, evidence(directory, { version: 2 }), evidence(directory, { kind: 'devices' }), evidence(directory, { requestedWorkspace: path.dirname(directory) }),
+    evidence(directory, { workspace: 'relative' }), evidence(directory, { observedAt: 'invalid' }), evidence(directory, { observedAt: 'x'.repeat(41) }),
+    evidence(directory, { system: { ...evidence().system, release: 'x'.repeat(129) } }),
     ...[{ size: '0', total: '100', free: '30', available: '20' }, { size: '4096', total: '0', free: '0', available: '0' },
       { size: '4096', total: '100', free: '101', available: '20' }, { size: '4096', total: '100', free: '30', available: '31' },
       { size: '4096', total: '100', free: '-1', available: '0' }, { size: '4096', total: '100', free: 30, available: '20' },
@@ -81,6 +83,50 @@ test('missing, malformed, inconsistent and mismatched workspace evidence becomes
   const denied = await inspectStorage(directory, async () => { throw new Error('Filesystem API unavailable. Bearer fixture-secret'); });
   assert.match(denied.error.message, /unavailable/); assert.doesNotMatch(denied.error.message, /fixture-secret/);
   assert.equal((await inspectStorage(directory, async () => { throw null; })).status, 'blocked');
+});
+
+test('storage success requires consistent failure metadata before block readings are examined', async () => {
+  const error = { stage: 'Filesystem capacity query', message: 'API access denied.' };
+  for (const patch of [{ status: undefined }, { status: 'unknown' }, { error: undefined }, { error: false }, { error }]) {
+    const raw = evidence(directory, patch);
+    Object.defineProperty(raw, 'blocks', { get() { throw new Error('Block readings were accessed.'); } });
+    const result = await inspectStorage(directory, async () => raw);
+    assert.equal(result.status, 'blocked');
+    for (const key of ['totalBytes', 'usedBytes', 'freeBytes', 'availableBytes']) assert.equal(result[key], undefined);
+    assert.doesNotMatch(storageReport(result), /Block readings were accessed/);
+  }
+  const failedFull = await inspectStorage(directory, async () => evidence(directory, { status: 'blocked', error,
+    blocks: { size: '4096', total: '100', free: '0', available: '0' } }));
+  assert.equal(failedFull.status, 'blocked'); assert.equal(failedFull.freeBytes, undefined); assert.equal(failedFull.availableBytes, undefined);
+  assert.doesNotMatch(storageReport(failedFull), /Free capacity|Available capacity/);
+});
+
+test('storage provider failures retain redacted diagnostics and reject placeholders or partial block counts', async () => {
+  const failed = evidence(directory, { status: 'blocked', blocks: null,
+    error: { stage: 'Filesystem capacity query', message: 'API access denied. Bearer fixture-secret ' + 'x'.repeat(1024) } });
+  const result = await inspectStorage(directory, async () => failed);
+  assert.equal(result.status, 'blocked'); assert.equal(result.observedAt, failed.observedAt); assert.equal(result.error.stage, 'Filesystem capacity query');
+  for (const key of ['totalBytes', 'usedBytes', 'freeBytes', 'availableBytes']) assert.equal(result[key], undefined);
+  assert.match(storageReport(result), /API access denied/); assert.doesNotMatch(storageReport(result), /fixture-secret/);
+  assert.ok(result.error.message.length <= 512);
+  for (const patch of [{ blocks: undefined }, { blocks: {} }, { blocks: { free: '0' } }, { blocks: evidence().blocks },
+    { error: null }, { error: {} }, { error: { stage: '', message: 'Denied.' } }, { error: { stage: '   ', message: 'Denied.' } },
+    { error: { stage: 'Capacity query', message: '' } }, { error: { stage: 'Capacity query', message: '   ' } }]) {
+    const ambiguous = await inspectStorage(directory, async () => ({ ...failed, ...patch }));
+    assert.equal(ambiguous.status, 'blocked');
+    for (const key of ['totalBytes', 'usedBytes', 'freeBytes', 'availableBytes']) assert.equal(ambiguous[key], undefined);
+    assert.match(ambiguous.error.message, /ambiguous failure evidence/);
+  }
+});
+
+test('null storage collector failures retain usable diagnostics without invented capacity', async () => {
+  for (const collect of [async () => null, async () => { throw null; }, async () => { throw undefined; }]) {
+    const result = await inspectStorage(directory, collect);
+    assert.equal(result.status, 'blocked');
+    for (const key of ['totalBytes', 'usedBytes', 'freeBytes', 'availableBytes']) assert.equal(result[key], undefined);
+    assert.equal(result.error.stage, 'Workspace storage capacity'); assert.ok(result.error.message);
+    assert.match(storageReport(result), /Storage capacity is blocked/);
+  }
 });
 
 test('a real read-only collection reports this test directory filesystem without changing its files', async () => {
@@ -140,6 +186,30 @@ test('unavailable filesystem capacity is saved as blocked and clears transient c
     const result = await app.actions['agent/send']({ text: 'show storage' });
     assert.equal(result.status, 'blocked'); assert.equal(result.totalBytes, undefined); assert.equal(app.snapshot().systemTool, null);
     assert.ok(app.snapshot().journal.some(entry => entry.type === 'output' && entry.data.delta?.includes('Storage capacity is blocked.')));
+  } finally { await app.close(); }
+});
+
+test('storage provider diagnostics survive chat restart and a successful full filesystem reading can recover', async () => {
+  const fake = new FakeCodex();
+  let app = await createApplication({ port: 0, codex: fake, autostart: false,
+    storageCollector: async workspace => evidence(workspace, { status: 'blocked', blocks: null,
+      error: { stage: 'Filesystem capacity query', message: 'API access denied.' } }) });
+  try {
+    const before = fake.calls.length, wasPaused = app.automation.saved.paused;
+    const result = await app.actions['agent/send']({ text: 'show storage' });
+    assert.equal(result.status, 'blocked'); assert.equal(result.totalBytes, undefined); assert.equal(result.availableBytes, undefined);
+    assert.equal(app.snapshot().systemTool, null); assert.equal(fake.calls.length, before); assert.equal(app.automation.saved.paused, wasPaused);
+    const output = app.snapshot().journal.find(entry => entry.type === 'output' && entry.data.delta?.includes('Filesystem capacity query: API access denied.'));
+    assert.ok(output); assert.match(output.data.delta, /Storage capacity is blocked/);
+    await app.close();
+    const restored = new FakeCodex();
+    app = await createApplication({ port: 0, codex: restored, autostart: false,
+      storageCollector: async workspace => evidence(workspace, { blocks: { size: '4096', total: '100', free: '0', available: '0' } }) });
+    assert.ok(app.snapshot().journal.some(entry => entry.data?.itemId === output.data.itemId));
+    const resumedCalls = restored.calls.length, recovered = await app.actions['agent/send']({ text: 'show storage' });
+    assert.equal(recovered.status, 'passed'); assert.equal(recovered.freeBytes, '0'); assert.equal(recovered.availableBytes, '0');
+    assert.equal(recovered.usedBytes, recovered.totalBytes); assert.match(storageReport(recovered), /Available capacity: 0\.00 GiB \(0 bytes\)/);
+    assert.equal(app.snapshot().systemTool, null); assert.equal(restored.calls.length, resumedCalls); assert.equal(app.automation.saved.paused, wasPaused);
   } finally { await app.close(); }
 });
 

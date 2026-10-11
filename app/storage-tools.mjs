@@ -24,7 +24,7 @@ export async function collectStorage(directory, { filesystem = fs } = {}) {
   if (!after.isDirectory() || before.dev !== after.dev || before.ino !== after.ino || await filesystem.realpath(directory) !== workspace) {
     throw new Error('The workspace changed during the capacity query. Refresh the reading.');
   }
-  return { version: 1, kind: 'storage', observedAt: new Date().toISOString(), requestedWorkspace: directory, workspace,
+  return { version: 1, kind: 'storage', status: 'passed', error: null, observedAt: new Date().toISOString(), requestedWorkspace: directory, workspace,
     system: { platform: process.platform, release: os.release(), runtimeArchitecture: process.arch },
     blocks: { size: count(capacity.bsize), total: count(capacity.blocks), free: count(capacity.bfree), available: count(capacity.bavail) } };
 }
@@ -33,12 +33,21 @@ export async function inspectStorage(directory, collect = collectStorage) {
   try {
     if (typeof directory !== 'string' || !path.isAbsolute(directory)) throw new Error('An absolute workspace folder is required.');
     const raw = await collect(directory);
-    if (raw?.version !== 1 || raw.kind !== 'storage' || raw.requestedWorkspace !== directory
+    if (raw?.version !== 1 || raw.kind !== 'storage' || !['passed', 'blocked'].includes(raw.status) || raw.requestedWorkspace !== directory
       || typeof raw.workspace !== 'string' || !path.isAbsolute(raw.workspace) || raw.workspace.length > 4096
-      || typeof raw.observedAt !== 'string' || !Number.isFinite(Date.parse(raw.observedAt)) || !raw.system
-      || ['platform', 'release', 'runtimeArchitecture'].some(key => typeof raw.system[key] !== 'string')
-      || !raw.blocks || ['size', 'total', 'free', 'available'].some(key => typeof raw.blocks[key] !== 'string' || !/^(?:0|[1-9][0-9]{0,19})$/.test(raw.blocks[key]))) {
+      || typeof raw.observedAt !== 'string' || raw.observedAt.length > 40 || !Number.isFinite(Date.parse(raw.observedAt)) || !raw.system
+      || ['platform', 'release', 'runtimeArchitecture'].some(key => typeof raw.system[key] !== 'string' || raw.system[key].length > 128)) {
       throw new Error('The storage collector returned unsupported evidence.');
+    }
+    if (raw.status === 'blocked') {
+      if (raw.blocks !== null || typeof raw.error?.stage !== 'string' || !raw.error.stage.trim()
+        || typeof raw.error.message !== 'string' || !raw.error.message.trim()) throw new Error('The storage collector returned ambiguous failure evidence.');
+      return { status: 'blocked', observedAt: raw.observedAt,
+        error: { stage: text(raw.error.stage), message: text(raw.error.message) } };
+    }
+    if (raw.error !== null) throw new Error('The storage collector returned conflicting failure evidence.');
+    if (!raw.blocks || ['size', 'total', 'free', 'available'].some(key => typeof raw.blocks[key] !== 'string' || !/^(?:0|[1-9][0-9]{0,19})$/.test(raw.blocks[key]))) {
+      throw new Error('The storage collector returned unsupported block readings.');
     }
     const blocks = Object.fromEntries(Object.entries(raw.blocks).filter(([key]) => ['size', 'total', 'free', 'available'].includes(key)).map(([key, value]) => [key, BigInt(value)]));
     if (Object.values(blocks).some(value => value > maximumCount) || blocks.size === 0n || blocks.total === 0n || blocks.free > blocks.total || blocks.available > blocks.free) {
