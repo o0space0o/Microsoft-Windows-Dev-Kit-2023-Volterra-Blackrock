@@ -1,11 +1,12 @@
 #Requires -RunAsAdministrator
 [CmdletBinding()]
-param()
+param([ValidatePattern('^development-[0-9]{3}$')][string]$BuildName='development-006')
 $ErrorActionPreference = 'Stop'
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$build = Join-Path $workspace 'build\development-006'
+$build = Join-Path $workspace ('build\'+$BuildName)
 $media = Join-Path $build 'iso-media'
-$iso = Join-Path $build 'Microsoft-Volterra-development-arm64.iso'
+$isoName = if ($BuildName -eq 'development-006') { 'Microsoft-Volterra-development-arm64.iso' } else { 'Microsoft-Volterra-'+$BuildName+'-arm64.iso' }
+$iso = Join-Path $build $isoName
 $adk = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools'
 function Save($Name,$Object) { $Object | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $build $Name) -Encoding utf8 }
 function Bcd([string[]]$Arguments) {
@@ -15,7 +16,7 @@ function Bcd([string[]]$Arguments) {
 }
 try {
     $finalized = Join-Path $build 'Finalize-result.json'
-    if (-not (Test-Path -LiteralPath $finalized)) { & (Join-Path $PSScriptRoot 'Finalize-ImagePayload.ps1') }
+    if (-not (Test-Path -LiteralPath $finalized)) { & (Join-Path $PSScriptRoot 'Finalize-ImagePayload.ps1') -BuildName $BuildName }
     if ((Get-Content -LiteralPath $finalized -Raw | ConvertFrom-Json).status -ne 'passed') { throw 'Final helper payload has not been verified.' }
     $result = Get-Content -LiteralPath (Join-Path $build 'output\result.json') -Raw | ConvertFrom-Json
     $receipt = Get-Content -LiteralPath (Join-Path $build 'image-receipt.json') -Raw | ConvertFrom-Json

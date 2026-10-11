@@ -25,6 +25,7 @@ export class Automation {
     if (['working', 'reviewing', 'checking', 'starting'].includes(this.saved.phase)) this.saved.phase = 'idle';
     if (this.saved.phase === 'restart-pending') {
       try { const update = JSON.parse(await fs.readFile(path.join(path.dirname(this.file), 'last-update.json'), 'utf8')); if (update.phase === 'confirmed' && update.commit === this.saved.comparison?.latest) this.saved.phase = 'idle'; } catch {}
+      try { const update = JSON.parse(await fs.readFile(path.join(path.dirname(this.file), 'pending-update.json'), 'utf8')); if (update.phase === 'rolled-back') { this.saved.phase = 'blocked'; this.saved.lastError = 'The helper update failed its startup health check and was rolled back. Previous files are retained.'; } } catch {}
     }
     await this.persist();
   }

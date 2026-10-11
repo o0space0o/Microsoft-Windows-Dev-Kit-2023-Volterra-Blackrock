@@ -17,7 +17,7 @@ export class Repository {
       await this.git('remote', 'add', 'origin', url);
       await this.fetch();
       // The image records the commit it contains. Attach that history without overwriting files.
-      const receipt = JSON.parse(await fs.readFile(path.join(this.directory, 'private', 'source-version.json'), 'utf8'));
+      const receipt = JSON.parse((await fs.readFile(path.join(this.directory, 'private', 'source-version.json'), 'utf8')).replace(/^\uFEFF/, ''));
       if (!/^[a-f0-9]{40}$/.test(receipt.commit)) throw new Error('The image source commit receipt is missing.');
       await this.git('cat-file', '-e', `${receipt.commit}^{commit}`);
       await this.git('update-ref', 'refs/heads/main', receipt.commit);
