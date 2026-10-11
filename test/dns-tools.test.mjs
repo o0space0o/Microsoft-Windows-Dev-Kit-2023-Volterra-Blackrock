@@ -11,7 +11,7 @@ process.env.VOLTERRA_STATE_DIR = path.join(directory, 'state');
 const { dnsQuery, collectDns, inspectDns, dnsReport } = await import('../app/dns-tools.mjs');
 const { createApplication } = await import('../app/server.mjs');
 const { describeProgress } = await import('../app/public/progress.js');
-const evidence = (patch = {}) => ({ version: 1, kind: 'dns', observedAt: '2026-10-11T18:00:00.000Z',
+const evidence = (patch = {}) => ({ version: 1, kind: 'dns', status: 'passed', error: null, observedAt: '2026-10-11T18:00:00.000Z',
   system: { platform: 'win32', release: 'fixture', runtimeArchitecture: 'arm64' },
   servers: ['192.0.2.53', '2001:db8::53', '192.0.2.54:1053', '[2001:db8::54]:1053'], ...patch });
 
@@ -40,6 +40,7 @@ test('the collector reads configuration without arguments and copies the returne
   let calls = 0; const servers = ['192.0.2.53'];
   const result = await collectDns({ readServers: (...args) => { assert.deepEqual(args, []); calls++; return servers; } });
   assert.equal(calls, 1); assert.equal(result.version, 1); assert.equal(result.kind, 'dns');
+  assert.equal(result.status, 'passed'); assert.equal(result.error, null);
   assert.ok(Number.isFinite(Date.parse(result.observedAt))); assert.deepEqual(result.servers, ['192.0.2.53']);
   servers[0] = '192.0.2.54'; assert.deepEqual(result.servers, ['192.0.2.53']);
   await assert.rejects(collectDns({ readServers: null }), /configuration API/);
@@ -100,6 +101,55 @@ test('empty configuration remains a reading rather than proof that name resoluti
   assert.match(dnsReport(result), /no configured server entries; resolution behavior remains unverified/);
   const noMatch = await inspectDns('missing', async () => evidence());
   assert.match(dnsReport(noMatch), /No configured server entries matched this literal filter/);
+});
+
+test('conflicting DNS failure evidence is blocked before any endpoint is read or filtered', async () => {
+  const servers = [];
+  Object.defineProperty(servers, 0, { get() { throw new Error('Endpoint was accessed.'); } });
+  const error = { stage: 'Resolver query', message: 'Configuration access denied.' };
+  for (const patch of [{ status: undefined }, { status: 'unknown' }, { error: undefined }, { error: false }, { error },
+    { status: 'blocked', error }, { status: 'blocked', error, servers: Array(1) }]) {
+    const result = await inspectDns('no-match', async () => evidence({ servers, ...patch }));
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.servers, []);
+    assert.equal(result.totalCount, undefined); assert.equal(result.matchedCount, undefined);
+    assert.doesNotMatch(dnsReport(result), /Endpoint was accessed/);
+  }
+  const failedEmpty = await inspectDns('', async () => evidence({ servers: [], error }));
+  assert.equal(failedEmpty.status, 'blocked'); assert.doesNotMatch(dnsReport(failedEmpty), /no configured server entries/);
+});
+
+test('complete DNS provider failures retain bounded redacted diagnostics and reject blank failure details', async () => {
+  const failed = evidence({ status: 'blocked', servers: [], error: { stage: 'Resolver query', message: 'Configuration access denied. Bearer fixture-secret ' + 'x'.repeat(1024) } });
+  const result = await inspectDns('no-match', async () => failed);
+  assert.equal(result.status, 'blocked'); assert.deepEqual(result.servers, []); assert.equal(result.observedAt, failed.observedAt);
+  assert.equal(result.error.stage, 'Resolver query'); assert.match(dnsReport(result), /Configuration access denied/);
+  assert.doesNotMatch(dnsReport(result), /fixture-secret/); assert.ok(result.error.message.length <= 512);
+  assert.equal(result.totalCount, undefined);
+  for (const error of [null, {}, { stage: '', message: 'Denied.' }, { stage: '   ', message: 'Denied.' },
+    { stage: 'Resolver query', message: '' }, { stage: 'Resolver query', message: '   ' }]) {
+    const rejected = await inspectDns('', async () => ({ ...failed, error }));
+    assert.equal(rejected.status, 'blocked'); assert.deepEqual(rejected.servers, []);
+    assert.match(rejected.error.message, /ambiguous failure evidence/);
+  }
+});
+
+test('sparse or missing DNS endpoints cannot disappear behind a literal filter', async () => {
+  const sparse = Array(2); sparse[1] = '192.0.2.53';
+  for (const servers of [Array(1), sparse, ['192.0.2.53', undefined], [null, '192.0.2.53'], ['192.0.2.53', 'invalid.example.invalid']]) {
+    const result = await inspectDns('no-match', async () => evidence({ servers }));
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.servers, []);
+    assert.equal(result.totalCount, undefined); assert.equal(result.matchedCount, undefined);
+    assert.match(dnsReport(result), /unsupported server endpoint/);
+  }
+});
+
+test('null DNS collector failures preserve usable blocked diagnostics', async () => {
+  for (const collect of [async () => null, async () => { throw null; }, async () => { throw undefined; }]) {
+    const result = await inspectDns('no-match', collect);
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.servers, []);
+    assert.equal(result.error.stage, 'DNS resolver configuration'); assert.ok(result.error.message);
+    assert.match(dnsReport(result), /DNS resolver configuration is blocked/);
+  }
 });
 
 test('IPv6 zone text is rejected before arbitrary scope data can enter chat or history', async () => {
@@ -176,6 +226,28 @@ test('a blocked DNS API reading is saved and clears transient checking', async (
     const result = await app.actions['agent/send']({ text: 'show DNS servers' });
     assert.equal(result.status, 'blocked'); assert.equal(app.snapshot().systemTool, null);
     assert.ok(app.snapshot().journal.some(entry => entry.type === 'output' && entry.data.delta?.includes('DNS resolver configuration is blocked.')));
+  } finally { await app.close(); }
+});
+
+test('DNS provider failures survive chat restart and a successful empty reading can recover', async () => {
+  const fake = new FakeCodex();
+  let app = await createApplication({ port: 0, codex: fake, autostart: false,
+    dnsCollector: async () => evidence({ status: 'blocked', servers: [], error: { stage: 'Resolver query', message: 'Configuration access denied.' } }) });
+  try {
+    const before = fake.calls.length, wasPaused = app.automation.saved.paused;
+    const result = await app.actions['agent/send']({ text: 'show DNS matching no-match' });
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.servers, []); assert.equal(result.totalCount, undefined);
+    assert.equal(app.snapshot().systemTool, null); assert.equal(fake.calls.length, before); assert.equal(app.automation.saved.paused, wasPaused);
+    const output = app.snapshot().journal.find(entry => entry.type === 'output' && entry.data.delta?.includes('Resolver query: Configuration access denied.'));
+    assert.ok(output); assert.match(output.data.delta, /DNS resolver configuration is blocked/);
+    await app.close();
+    const restored = new FakeCodex();
+    app = await createApplication({ port: 0, codex: restored, autostart: false, dnsCollector: async () => evidence({ servers: [] }) });
+    assert.ok(app.snapshot().journal.some(entry => entry.data?.itemId === output.data.itemId));
+    const resumedCalls = restored.calls.length, recovered = await app.actions['agent/send']({ text: 'show DNS' });
+    assert.equal(recovered.status, 'passed'); assert.equal(recovered.totalCount, 0); assert.equal(recovered.matchedCount, 0);
+    assert.match(dnsReport(recovered), /no configured server entries; resolution behavior remains unverified/);
+    assert.equal(app.snapshot().systemTool, null); assert.equal(restored.calls.length, resumedCalls); assert.equal(app.automation.saved.paused, wasPaused);
   } finally { await app.close(); }
 });
 

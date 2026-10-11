@@ -20,7 +20,7 @@ export async function collectDns({ readServers = () => dns.getServers() } = {}) 
   if (typeof readServers !== 'function') throw new Error('The Node DNS resolver configuration API is required.');
   const servers = await readServers();
   if (!Array.isArray(servers)) throw new Error('The DNS resolver API returned unsupported readings.');
-  return { version: 1, kind: 'dns', observedAt: new Date().toISOString(),
+  return { version: 1, kind: 'dns', status: 'passed', error: null, observedAt: new Date().toISOString(),
     system: { platform: process.platform, release: os.release(), runtimeArchitecture: process.arch }, servers: Array.from(servers) };
 }
 
@@ -42,9 +42,17 @@ export async function inspectDns(filter = '', collect = collectDns) {
   validateFilter(filter);
   try {
     const raw = await collect();
-    if (raw?.version !== 1 || raw.kind !== 'dns' || typeof raw.observedAt !== 'string' || raw.observedAt.length > 40 || !Number.isFinite(Date.parse(raw.observedAt))
+    if (raw?.version !== 1 || raw.kind !== 'dns' || !['passed', 'blocked'].includes(raw.status)
+      || typeof raw.observedAt !== 'string' || raw.observedAt.length > 40 || !Number.isFinite(Date.parse(raw.observedAt))
       || !raw.system || ['platform', 'release', 'runtimeArchitecture'].some(key => typeof raw.system[key] !== 'string' || raw.system[key].length > 128)
       || !Array.isArray(raw.servers) || raw.servers.length > 256) throw new Error('The DNS collector returned unsupported evidence.');
+    if (raw.status === 'blocked') {
+      if (raw.servers.length || typeof raw.error?.stage !== 'string' || !raw.error.stage.trim()
+        || typeof raw.error.message !== 'string' || !raw.error.message.trim()) throw new Error('The DNS collector returned ambiguous failure evidence.');
+      return { status: 'blocked', observedAt: raw.observedAt, servers: [],
+        error: { stage: text(raw.error.stage), message: text(raw.error.message) } };
+    }
+    if (raw.error !== null) throw new Error('The DNS collector returned conflicting failure evidence.');
     // Preserve returned order and repeated entries. This is resolver configuration,
     // not a Windows adapter inventory or a measurement of DNS query outcomes.
     const all = Array.from(raw.servers, (value, index) => endpoint(value, index + 1));
