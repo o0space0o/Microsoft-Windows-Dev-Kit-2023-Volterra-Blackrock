@@ -39,12 +39,14 @@ export async function inspectLogs(filter = '', collect = collectLogs) {
     const environment = system.edition === 'WinVOS' ? 'Validation OS session; VM or physical identity unverified'
       : system.edition === 'Unknown' ? 'Windows session; OS edition unverified' : 'Windows session; VM or physical identity unverified';
     const names = new Set(), all = [];
-    const channels = raw.channels.map(channel => {
+    // Visit every channel slot so absent readings cannot become a successful empty sample.
+    const channels = Array.from(raw.channels, channel => {
       if (!channelNames.includes(channel?.name) || names.has(channel.name) || !['passed', 'blocked'].includes(channel.status)
         || !Array.isArray(channel.events) || channel.events.length > sampleLimit) throw new Error('The event log collector returned incomplete channel readings.');
       names.add(channel.name);
       if (channel.status === 'blocked') {
-        if (channel.events.length || typeof channel.error?.stage !== 'string' || typeof channel.error.message !== 'string' || !channel.error.message.trim()) {
+        if (channel.events.length || typeof channel.error?.stage !== 'string' || !channel.error.stage.trim()
+          || typeof channel.error.message !== 'string' || !channel.error.message.trim()) {
           throw new Error('The event log collector returned ambiguous channel failure evidence.');
         }
         return { name: channel.name, status: 'blocked', sampledCount: 0,
@@ -73,7 +75,7 @@ export async function inspectLogs(filter = '', collect = collectLogs) {
     return { status, observedAt: raw.observedAt, system, environment, filter: text(filter, 256), source: 'Local Windows Event Log API (Get-WinEvent)',
       maxEvents: sampleLimit, channels, sampledCount: all.length, matchedCount: events.length, events };
   } catch (error) {
-    return { status: 'blocked', filter: text(filter, 256), channels: [], events: [], error: { stage: 'Event log inventory', message: text(error.message) } };
+    return { status: 'blocked', filter: text(filter, 256), channels: [], events: [], error: { stage: 'Event log inventory', message: text(error?.message || 'The event log query did not succeed.') } };
   }
 }
 

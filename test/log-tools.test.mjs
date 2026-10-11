@@ -152,6 +152,58 @@ test('malformed event metadata cannot become a passing report; identities are ch
   assert.equal(largest.status, 'passed'); assert.equal(largest.events[0].recordId, '9223372036854775807');
 });
 
+test('missing channel or event rows cannot become a successful empty sample or inflate sampled counts', async () => {
+  const missingFirst = Array(2); missingFirst[1] = evidence().channels[1];
+  const missingSecond = Array(2); missingSecond[0] = channel('System');
+  const blockedWithHole = Array(2); blockedWithHole[0] = denied('System');
+  for (const channels of [Array(2), missingFirst, missingSecond, blockedWithHole,
+    [null, channel('Application')], [channel('System'), undefined]]) {
+    for (const status of ['passed', 'blocked']) {
+      const result = await inspectLogs('', async () => evidence({ status, channels }));
+      assert.equal(result.status, 'blocked'); assert.deepEqual(result.channels, []); assert.deepEqual(result.events, []);
+      assert.equal(result.sampledCount, undefined); assert.equal(result.matchedCount, undefined);
+      assert.match(logReport(result), /blocked.*incomplete channel readings/);
+      assert.doesNotMatch(logReport(result), /successful channel queries|Live event log metadata/);
+    }
+  }
+  const partialEvents = Array(2); partialEvents[0] = event();
+  for (const events of [Array(1), partialEvents, [event(), undefined], [null]]) {
+    const result = await inspectLogs('', async () => evidence({ channels: [channel('System', events), channel('Application')] }));
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.events, []); assert.deepEqual(result.channels, []);
+    assert.equal(result.sampledCount, undefined); assert.match(logReport(result), /incomplete or duplicate event metadata/);
+  }
+  const empty = await inspectLogs('', async () => evidence({ channels: [channel('System'), channel('Application')] }));
+  assert.equal(empty.status, 'passed'); assert.equal(empty.sampledCount, 0);
+  const zero = await inspectLogs('', async () => evidence({ channels: [channel('System', [event({ id: 0, level: 0, recordId: null, createdAt: null })]), channel('Application')] }));
+  assert.equal(zero.status, 'passed'); assert.equal(zero.sampledCount, 1);
+  assert.match(logReport(zero), /Event ID: 0\. Record ID: Unreported\. Level: Log always \(0\)/);
+  assert.match(logReport(zero), /Created: Unreported/);
+});
+
+test('blocked channels require a named failure stage and preserve valid channel-specific diagnostics', async () => {
+  for (const error of [null, {}, { stage: '', message: 'Denied' }, { stage: ' \t ', message: 'Denied' },
+    { stage: null, message: 'Denied' }, { stage: 1, message: 'Denied' }, { stage: 'Read', message: ' ' }, { stage: 'Read', message: {} }]) {
+    const result = await inspectLogs('', async () => evidence({ status: 'blocked',
+      channels: [{ ...denied('System'), error }, evidence().channels[1]] }));
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.events, []); assert.deepEqual(result.channels, []);
+    assert.match(logReport(result), /ambiguous channel failure evidence/);
+  }
+  const result = await inspectLogs('', async () => evidence({ status: 'blocked', channels: [denied('System'), evidence().channels[1]] }));
+  assert.equal(result.channels[0].error.stage, 'System event query'); assert.equal(result.sampledCount, 1);
+  assert.match(logReport(result), /Application: 1 events sampled/); assert.doesNotMatch(JSON.stringify(result), /fixture-secret/);
+});
+
+test('null and non-Error collector failures remain blocked with renderable redacted diagnostics', async () => {
+  for (const failure of [null, undefined, '', 'Access denied', 123, {}]) {
+    const result = await inspectLogs('sk-fixture-filter', async () => { throw failure; });
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.events, []); assert.deepEqual(result.channels, []);
+    assert.equal(result.error.stage, 'Event log inventory'); assert.equal(result.sampledCount, undefined);
+    assert.match(logReport(result), /event log query did not succeed/); assert.doesNotMatch(JSON.stringify(result), /fixture-filter/);
+  }
+  const result = await inspectLogs('', async () => { throw { message: 'Read denied. Bearer fixture-secret' }; });
+  assert.match(logReport(result), /Read denied/); assert.doesNotMatch(logReport(result), /fixture-secret/);
+});
+
 test('chat rendering is bounded while the authenticated result retains the whole collected sample', async () => {
   const result = await inspectLogs('', async () => evidence({ channels: channelNamesForFixture().map(name => channel(name,
     Array.from({ length: 50 }, (_, index) => event({ channel: name, recordId: String(index + 1) })))) }));
@@ -213,6 +265,35 @@ test('collector failures retain a redacted blocked chat report and clear the tra
     assert.equal(result.status, 'blocked'); assert.deepEqual(result.events, []); assert.equal(app.snapshot().systemTool, null);
     const output = app.snapshot().journal.find(entry => entry.type === 'output' && entry.data.delta?.includes('Script execution is disabled by policy.'));
     assert.ok(output); assert.doesNotMatch(output.data.delta, /fixture-secret/);
+  } finally { await app.close(); }
+});
+
+test('log collector anomalies save blocked output across restart and checking recovers for a complete query', async () => {
+  let calls = 0;
+  const options = { port: 0, codex: new FakeCodex(), autostart: false, logCollector: async () => {
+    calls++;
+    if (calls === 1) throw null;
+    if (calls === 2) return evidence({ channels: Array(2) });
+    if (calls === 3) return evidence({ status: 'blocked', channels: [{ ...denied('System'), error: { stage: ' ', message: 'Denied' } }, channel('Application')] });
+    return evidence();
+  } };
+  let app = await createApplication(options);
+  try {
+    const blockedOutputs = () => app.snapshot().journal.filter(entry => entry.type === 'output'
+      && entry.data.delta?.startsWith('Event log inventory is blocked.'));
+    const before = blockedOutputs().length;
+    const beforeCodexCalls = options.codex.calls.length;
+    for (let index = 0; index < 3; index++) {
+      const result = await app.actions['agent/send']({ text: 'show logs' });
+      assert.equal(result.status, 'blocked'); assert.equal(result.sampledCount, undefined);
+      assert.equal(app.snapshot().systemTool, null);
+    }
+    const saved = blockedOutputs().slice(before); assert.equal(saved.length, 3); assert.equal(options.codex.calls.length, beforeCodexCalls);
+    await app.close(); app = await createApplication({ ...options, codex: new FakeCodex() });
+    for (const output of saved) assert.ok(app.snapshot().journal.some(entry => entry.data?.itemId === output.data.itemId));
+    const result = await app.actions['agent/send']({ text: 'show logs' });
+    assert.equal(result.status, 'passed'); assert.equal(result.sampledCount, 2); assert.equal(calls, 4);
+    assert.equal(app.snapshot().systemTool, null);
   } finally { await app.close(); }
 });
 
