@@ -1,5 +1,9 @@
 [CmdletBinding()]
-param([Parameter(Mandatory=$true)][Guid]$VMId,[Parameter(Mandatory=$true)][string]$OutputFile)
+param(
+    [Parameter(Mandatory=$true)][Guid]$VMId,
+    [Parameter(Mandatory=$true)][string]$OutputFile,
+    [Guid]$CaptureId=[Guid]::NewGuid()
+)
 $ErrorActionPreference = 'Stop'
 try {
     $vm = Get-WmiObject -Namespace root\virtualization\v2 -Class Msvm_ComputerSystem -Filter "Name='$VMId'"
@@ -22,9 +26,19 @@ try {
         $writer.Write([int]3); $writer.Write([int]$pixels.Length)
         foreach ($zero in 1..4) { $writer.Write([int]0) }
         $writer.Write([int]63488); $writer.Write([int]2016); $writer.Write([int]31); $writer.Write($pixels)
-        [IO.File]::WriteAllBytes($OutputFile+'.bmp',$stream.ToArray())
+        $bmpBytes = $stream.ToArray()
     } finally { $writer.Dispose(); $stream.Dispose() }
     Add-Type -AssemblyName System.Drawing
-    $bitmap = New-Object Drawing.Bitmap($OutputFile+'.bmp')
-    try { $bitmap.Save($OutputFile,[Drawing.Imaging.ImageFormat]::Png) } finally { $bitmap.Dispose() }
-} catch { $_.Exception.Message | Set-Content -LiteralPath ($OutputFile+'.error.txt') }
+    $bmpStream = [IO.MemoryStream]::new($bmpBytes)
+    $pngStream = [IO.MemoryStream]::new()
+    try {
+        $bitmap = [Drawing.Bitmap]::new($bmpStream)
+        try { $bitmap.Save($pngStream,[Drawing.Imaging.ImageFormat]::Png) } finally { $bitmap.Dispose() }
+        $payload = @{ pngBase64=[Convert]::ToBase64String($pngStream.ToArray()) } | ConvertTo-Json -Compress
+    } finally { $bmpStream.Dispose(); $pngStream.Dispose() }
+    $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    $node = Join-Path $workspace 'private\tools\node.exe'
+    $json = $payload | & $node (Join-Path $PSScriptRoot 'Save-VM-Capture.mjs') $OutputFile ([string]$CaptureId) ([string]$VMId)
+    if ($LASTEXITCODE -ne 0) { throw 'Capture output validation/publication failed.' }
+    Write-Output $json
+} catch { throw }
