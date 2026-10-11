@@ -15,9 +15,10 @@ import { storageQuery, collectStorage, inspectStorage, storageReport } from './s
 import { networkQuery, collectNetworking, inspectNetworking, networkReport } from './network-tools.mjs';
 import { fileQuery, collectFiles, inspectFiles, fileReport } from './file-tools.mjs';
 import { logQuery, collectLogs, inspectLogs, logReport } from './log-tools.mjs';
+import { maintenanceQuery, collectMaintenance, inspectMaintenance, maintenanceReport } from './maintenance-tools.mjs';
 import { githubBrowserCommand } from '../scripts/Open-Browser.mjs';
 
-export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices, storageCollector = collectStorage, networkCollector = collectNetworking, browserOpener = openBrowser, fileCollector = collectFiles, logCollector = collectLogs } = {}) {
+export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices, storageCollector = collectStorage, networkCollector = collectNetworking, browserOpener = openBrowser, fileCollector = collectFiles, logCollector = collectLogs, maintenanceCollector = collectMaintenance } = {}) {
   const state = await readState();
   const defaultFolder = await fs.realpath(process.env.VOLTERRA_OS_ROOT || root);
   if (!state.selected || (process.env.VOLTERRA_OS_ROOT && state.selected !== defaultFolder)) {
@@ -43,7 +44,8 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     { kind: 'storage', query: storageQuery, inspect: () => inspectStorage(selected()?.path || defaultFolder, storageCollector), report: storageReport, notice: 'Reading filesystem capacity for the selected workspace.' },
     { kind: 'networking', query: networkQuery, inspect: query => inspectNetworking(query.filter, networkCollector), report: networkReport, notice: 'Reading assigned interface addresses for this OS session.' },
     { kind: 'files', query: fileQuery, inspect: query => inspectFiles(selected()?.path || defaultFolder, query.filter, fileCollector), report: fileReport, notice: 'Reading metadata for the selected workspace root.' },
-    { kind: 'logs', query: logQuery, inspect: query => inspectLogs(query.filter, logCollector), report: logReport, script: 'Get-LogInventory.ps1' }
+    { kind: 'logs', query: logQuery, inspect: query => inspectLogs(query.filter, logCollector), report: logReport, script: 'Get-LogInventory.ps1' },
+    { kind: 'maintenance', query: maintenanceQuery, inspect: () => inspectMaintenance(maintenanceCollector), report: maintenanceReport, script: 'Get-MaintenanceStatus.ps1' }
   ];
   function event(type, data) {
     const entry = JSON.parse(redact(JSON.stringify({ type, data, time: new Date().toISOString() })));
