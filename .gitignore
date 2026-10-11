@@ -1,0 +1,12 @@
+/build/
+/private/
+/*.iso
+/*.wim
+/*.vhdx
+node_modules/
+.env*
+!*.example
+auth.json
+*.credential
+*.dpapi
+*.log

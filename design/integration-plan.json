@@ -1,0 +1,67 @@
+{
+  "status": "Local prototype implemented. Existing Codex ChatGPT account and real host inference verified. Fresh browser consent, GitHub authorization and composed OS runtime remain unverified.",
+  "preference": "Browser sign-in using the ChatGPT plan; do not require an OpenAI API key",
+  "service_roles": {
+    "GitHub": "Repository sync, review and released update packages",
+    "Codex": "Local execution runtime for project editing, tests, approvals and saved threads",
+    "OpenAI": "Provides the online models through the authorized ChatGPT plan"
+  },
+  "connections_ui": {
+    "entry": "Maintenance",
+    "companion_screen": "Connections",
+    "sections": [
+      "GitHub",
+      "Codex",
+      "ChatGPT account",
+      "Project folder"
+    ],
+    "initial_states": {
+      "GitHub": "Not connected",
+      "Codex": "Not running",
+      "ChatGPT account": "Not signed in",
+      "Project folder": "Automatically selected OS root; build project in the host preview"
+    }
+  },
+  "authentication": {
+    "route": "Official Sign in with ChatGPT for open-source locally hosted clients",
+    "action_label": "Continue with ChatGPT",
+    "browser": "System browser, such as Chrome or Edge; official authorization pages",
+    "request_chatgpt_plan_permission": true,
+    "require_granted_plan_scope": true,
+    "identity_sign_in_alone_is_insufficient": true,
+    "eligibility": "Eligible accounts and plan usage limits apply; verify after sign-in",
+    "credential_storage": "Per user, outside the repository and distributable ISO; use a supported secure store or tightly restricted local storage",
+    "embedded_browser": "Do not assume supported; prototype official system-browser flow first",
+    "device_code_fallback": "Available through Codex CLI/app-server managed authentication where supported; test before relying on it on Validation OS"
+  },
+  "project_workflow": [
+    "Automatically use the installed Validation OS root as the workspace; use this build project in the Windows host preview. Opening another project is optional.",
+    "Optionally connect a GitHub repository with an independently authorized GitHub integration.",
+    "Associate the absolute folder path and Git metadata with a saved local Codex thread ID.",
+    "Start and resume Codex work scoped to that folder; allowlist additional actions explicitly.",
+    "Save project files to disk, keep conversation history locally and use deliberate Git checkpoints.",
+    "On restart restore the selected folder and resume the saved thread; restart the runtime with refreshed OAuth tokens when required."
+  ],
+  "github": {
+    "authentication": "Separate browser/device OAuth authorization; ChatGPT sign-in does not authorize GitHub",
+    "registration": "Register a GitHub integration before implementing its user authorization",
+    "automatic_review": "Separate from device-local Codex; enable through the connected repository and Codex review settings",
+    "public_updates": "Public release downloads may be unauthenticated; always verify publisher signatures before applying updates"
+  },
+  "constraints": [
+    "ChatGPT sign-in does not import existing ChatGPT conversations or memories.",
+    "ChatGPT sign-in does not grant administrator control of Windows.",
+    "Codex app-server is currently experimental and not supported for production workloads.",
+    "Chrome, Edge, secure storage and the Codex runtime must each be tested against the composed Validation OS API surface.",
+    "Writable project and thread storage must survive reboots; do not store durable state only in a RAM boot volume.",
+    "Keep boot-time operating-system servicing independent of the AI suggestion loop and provide a tested recovery path."
+  ],
+  "sources": [
+    "https://developers.openai.com/siwc/token-sharing-open-source",
+    "https://developers.openai.com/siwc/token-sharing-open-source/sign-in",
+    "https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server",
+    "https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations",
+    "https://learn.chatgpt.com/docs/app-server",
+    "https://docs.github.com/en/apps/creating-github-apps/writing-code-for-a-github-app/building-a-cli-with-a-github-app"
+  ]
+}

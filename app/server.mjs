@@ -1,0 +1,262 @@
+import http from 'node:http';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { CodexBridge } from './codex.mjs';
+import { ChatGPTSignIn } from './auth.mjs';
+import { root, executable, run, powershell, openBrowser, chooseFolder, redact } from './platform.mjs';
+import { readState, saveState, projectPath, readCredential } from './storage.mjs';
+
+export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge() } = {}) {
+  const state = await readState();
+  const defaultFolder = await fs.realpath(process.env.VOLTERRA_OS_ROOT || root);
+  if (!state.selected || (process.env.VOLTERRA_OS_ROOT && state.selected !== defaultFolder)) {
+    state.projects[defaultFolder] ||= { path: defaultFolder, name: process.env.VOLTERRA_OS_ROOT ? 'System workspace' : 'OS build workspace', threadId: null };
+    state.selected = defaultFolder;
+  }
+  if (process.env.VOLTERRA_OS_ROOT && state.autoContinueVision === undefined) state.autoContinueVision = true;
+  await saveState(state);
+  const clients = new Set(), journal = [], approvals = new Map();
+  const session = randomBytes(32).toString('hex');
+  let origin, account = null, activeTurn = null, loadedThread = null, paused = false, pauseRequested = false, restartRequired = false, github = null, runtimeToken = null, runtimeStart;
+  const selected = () => state.selected && state.projects[state.selected];
+  function event(type, data) {
+    const entry = JSON.parse(redact(JSON.stringify({ type, data, time: new Date().toISOString() })));
+    if (type !== 'state') { journal.push(entry); if (journal.length > 1000) journal.shift(); }
+    const serialized = `data: ${JSON.stringify(entry)}\n\n`;
+    for (const client of clients) client.write(serialized);
+    if (['message', 'command', 'output', 'error', 'notice'].includes(type)) process.stdout.write(`[${type}] ${typeof entry.data === 'string' ? entry.data : JSON.stringify(entry.data)}\n`);
+  }
+  const snapshot = () => ({ project: selected() || null, projects: Object.values(state.projects), authMode: state.authMode, account, github, running: !!codex.child, activeTurn, paused, restartRequired, approvals: [...approvals.values()], journal: journal.slice(-300), sourceArtwork: 'Approved reference artwork; sample labels are part of the reference', implementation: 'Development prototype' });
+  const publish = () => event('state', snapshot());
+  const auth = new ChatGPTSignIn(state, async () => {
+    state.authMode = 'siwc'; await saveState(state);
+    const credential = await readCredential(); account = { type: 'chatgpt', email: credential.email, source: 'This app’s ChatGPT plan authorization' };
+    event('notice', 'ChatGPT plan connected. Project history stays on this device.'); publish();
+    await continueInitialVision();
+  }, error => event('error', error));
+  codex.on('diagnostic', message => event('notice', message));
+  codex.on('stopped', () => { loadedThread = null; activeTurn = null; approvals.clear(); event('notice', 'Codex stopped. Saved project history is retained.'); publish(); });
+  codex.on('approval', request => { approvals.set(request.id, request); event('approval', request); publish(); });
+  codex.on('notification', async ({ method, params }) => {
+    try {
+      const project = selected();
+      if (params?.threadId && project?.threadId && params.threadId !== project.threadId) return;
+      if (method === 'item/agentMessage/delta') event('message', { itemId: params.itemId, delta: params.delta });
+      else if (method === 'item/commandExecution/outputDelta') event('output', { itemId: params.itemId, delta: params.delta });
+      else if (method === 'item/started') {
+        if (params.item?.type === 'commandExecution') event('command', { command: params.item.command, cwd: params.item.cwd });
+        else if (params.item?.type === 'fileChange') event('notice', { files: params.item.changes });
+      } else if (method === 'turn/started') { activeTurn = params.turn.id; paused = false; publish(); }
+      else if (method === 'turn/completed') {
+        activeTurn = null; paused = pauseRequested && params.turn.status === 'interrupted'; pauseRequested = false;
+        event(params.turn.status === 'failed' ? 'error' : 'notice', { status: params.turn.status, error: params.turn.error?.message || null });
+        if (project) { project.lastStatus = params.turn.status; project.updatedAt = new Date().toISOString(); await saveState(state); }
+        publish();
+      } else if (method === 'account/login/completed') {
+        if (params.success) { await readManagedAccount(); state.authMode = 'codex'; await saveState(state); event('notice', 'Codex browser sign-in completed.'); await continueInitialVision(); }
+        else event('error', params.error || 'Codex browser sign-in did not complete.');
+        publish();
+      } else if (method === 'account/updated') { if (state.authMode === 'codex') await readManagedAccount(); publish(); }
+      else if (method === 'error') event('error', params.error?.message || 'Codex reported an error.');
+    } catch (error) { event('error', error.message); }
+  });
+  async function readManagedAccount() {
+    const response = await codex.request('account/read', { refreshToken: false });
+    account = response.account?.type === 'chatgpt' ? { type: 'chatgpt', email: response.account.email, planType: response.account.planType, source: 'Codex-managed ChatGPT sign-in' } : null;
+    return account;
+  }
+  async function continueInitialVision() {
+    if (!state.autoContinueVision || activeTurn || !account) return;
+    await actions['agent/vision']();
+    state.autoContinueVision = false; await saveState(state);
+  }
+  async function ensureRuntime(mode = state.authMode) {
+    if (runtimeStart) await runtimeStart;
+    const token = mode === 'siwc' ? await auth.accessToken() : null;
+    if (codex.child && token !== runtimeToken) {
+      if (activeTurn) throw new Error('Finish or interrupt the current job before renewing the runtime connection.');
+      await codex.stop(); loadedThread = null;
+    }
+    if (!codex.child) {
+      runtimeToken = token;
+      runtimeStart = codex.start(token).finally(() => { runtimeStart = null; });
+      await runtimeStart;
+    }
+    if (mode !== 'siwc') await readManagedAccount();
+    publish();
+  }
+  async function ensureThread() {
+    const project = selected();
+    if (!project) throw new Error('Open a persistent project folder first.');
+    if (!state.authMode) throw new Error('Connect ChatGPT or your existing Codex account first.');
+    await ensureRuntime();
+    if (!account && state.authMode === 'codex') throw new Error('Sign in to Codex using ChatGPT before starting work.');
+    if (loadedThread === project.threadId && loadedThread) return project;
+    const options = { cwd: project.path, sandbox: 'workspace-write', approvalPolicy: 'on-request' };
+    const result = project.threadId ? await codex.request('thread/resume', { ...options, threadId: project.threadId })
+      : await codex.request('thread/start', { ...options, developerInstructions: 'Work within the selected project. Read its AGENTS.md and PROJECT_BRIEF.md when present. Never modify boot entries, partitions or an OS image without an explicit user instruction for the exact operation. Never restart the host automatically. Report required restarts. Do not publish private OS binaries or credentials.' });
+    project.threadId = result.thread.id; loadedThread = project.threadId; await saveState(state); publish(); return project;
+  }
+  async function checkRestart() {
+    if (!powershell) return;
+    try {
+      const result = await run(powershell, ['-NoProfile', '-File', path.join(root, 'scripts', 'Get-RestartStatus.ps1')]);
+      const detected = JSON.parse(result).required;
+      if (detected !== restartRequired) { restartRequired = detected; publish(); }
+    } catch { /* An unavailable registry probe must not stop the project helper. */ }
+  }
+  const actions = {
+    'chatgpt/sign-in': () => auth.begin(),
+    'chatgpt/cancel': async () => { auth.cancel(); return {}; },
+    'codex/connect': async () => { if (activeTurn) throw new Error('Interrupt the active job before changing accounts.'); await ensureRuntime('codex'); state.authMode = 'codex'; await saveState(state); publish(); return { connected: !!account }; },
+    'codex/sign-in': async body => {
+      if (activeTurn) throw new Error('Interrupt the active job before signing in again.');
+      await ensureRuntime('codex'); state.authMode = 'codex'; await saveState(state);
+      const result = await codex.request('account/login/start', { type: body.device ? 'chatgptDeviceCode' : 'chatgpt' });
+      await openBrowser(result.authUrl || result.verificationUrl);
+      // Do not expose an authorization URL with state or identity hints to logs.
+      return { status: 'Waiting for browser sign-in', userCode: result.userCode || null };
+    },
+    'project/open': async body => {
+      if (activeTurn) throw new Error('Pause or interrupt the current job before opening another folder.');
+      const entered = body.browse ? await chooseFolder() : body.path;
+      if (!entered) return { cancelled: true };
+      if (typeof entered !== 'string' || !path.isAbsolute(entered)) throw new Error('Enter an absolute project folder path.');
+      const resolved = await fs.realpath(entered);
+      if (!(await fs.stat(resolved)).isDirectory()) throw new Error('The selected path is not a folder.');
+      await fs.access(resolved, fs.constants.W_OK);
+      state.projects[resolved] ||= { path: resolved, name: path.basename(resolved), threadId: null };
+      state.selected = resolved; loadedThread = null; paused = false; await saveState(state); publish();
+      return { project: selected() };
+    },
+    'project/resume': async () => { const project = await ensureThread(); return { project }; },
+    'agent/send': async body => {
+      if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 100_000) throw new Error('Enter a message of up to 100,000 characters.');
+      const project = await ensureThread();
+      const input = [{ type: 'text', text: body.text, text_elements: [] }];
+      event('user', body.text);
+      if (activeTurn) return codex.request('turn/steer', { threadId: project.threadId, expectedTurnId: activeTurn, input });
+      const result = await codex.request('turn/start', { threadId: project.threadId, input });
+      activeTurn = result.turn.id; paused = false; publish(); return { turnId: activeTurn };
+    },
+    'agent/vision': async () => {
+      const brief = await fs.readFile(path.join(root, 'PROJECT_BRIEF.md'), 'utf8');
+      return actions['agent/send']({ text: `Continue the authorized Microsoft Volterra implementation in this project. Inspect the current files first, preserve existing work, carry the requirements below into the project, and make verifiable progress. Do not restart this machine.\n\n${brief}` });
+    },
+    'agent/interrupt': async body => {
+      if (!activeTurn) return { status: 'No active turn' };
+      pauseRequested = !!body.pause;
+      const threadId = selected().threadId, turnId = activeTurn;
+      await codex.request('turn/interrupt', { threadId, turnId });
+      try { await codex.request('thread/backgroundTerminals/clean', { threadId }); }
+      catch (error) { event('error', `The turn was interrupted, but stopping background terminals could not be confirmed: ${error.message}`); }
+      return { status: 'Interruption requested; waiting for confirmation' };
+    },
+    'agent/review': async () => {
+      if (activeTurn) throw new Error('Finish or interrupt the current job before starting a review.');
+      const project = await ensureThread();
+      const result = await codex.request('review/start', { threadId: project.threadId, target: { type: 'uncommittedChanges' }, delivery: 'inline' });
+      activeTurn = result.turn.id; publish(); return { turnId: activeTurn };
+    },
+    'approval/reply': async body => {
+      const request = approvals.get(String(body.id));
+      if (!request) throw new Error('This request is no longer pending.');
+      let result;
+      if (request.method === 'item/tool/requestUserInput') {
+        if (!body.answers || typeof body.answers !== 'object') throw new Error('Answer each question before continuing.');
+        result = { answers: body.answers };
+      } else if (request.method === 'item/permissions/requestApproval') {
+        result = { permissions: body.allow ? request.params.permissions : {}, scope: 'turn' };
+      } else result = { decision: body.allow ? 'accept' : 'decline' };
+      codex.reply(body.id, result); approvals.delete(String(body.id)); publish(); return {};
+    },
+    'file/read': async body => {
+      const target = await projectPath(selected()?.path, body.path);
+      if ((await fs.stat(target)).size > 1_000_000) throw new Error('Open a text file smaller than 1 MB.');
+      return { path: body.path, content: await fs.readFile(target, 'utf8') };
+    },
+    'file/save': async body => {
+      if (activeTurn) throw new Error('Pause the agent before saving this file to avoid competing edits.');
+      if (typeof body.content !== 'string' || Buffer.byteLength(body.content) > 1_000_000) throw new Error('Save a text file smaller than 1 MB.');
+      const target = await projectPath(selected()?.path, body.path, true);
+      await fs.writeFile(target, body.content, { flag: 'w' }); event('notice', `Saved ${body.path}`); return { saved: true };
+    },
+    'github/sign-in': async () => {
+      if (github?.pending) throw new Error('GitHub browser sign-in is already pending.');
+      const env = { ...process.env };
+      if (powershell) env.GH_BROWSER = `"${powershell}" -NoProfile -File "${path.join(root, 'scripts/Open-Browser.ps1')}" -Url`;
+      const child = spawn(executable('gh'), ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web'], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      github = { pending: true }; publish();
+      child.stdin.end();
+      for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => event('notice', redact(chunk.toString())));
+      child.once('error', error => { github = null; event('error', error.message); publish(); });
+      child.once('exit', async code => {
+        try { github = code === 0 ? { login: await run(executable('gh'), ['api', 'user', '--jq', '.login']) } : null; if (code !== 0) event('error', 'GitHub sign-in did not complete.'); }
+        catch (error) { event('error', error.message); github = null; }
+        publish();
+      });
+      return { status: 'Follow the GitHub browser sign-in instructions in the journal' };
+    },
+    'github/inspect': async body => {
+      if (!/^[\w.-]+\/[\w.-]+$/.test(body.repository || '')) throw new Error('Enter a GitHub repository as owner/name.');
+      const repo = body.repository;
+      const details = JSON.parse(await run(executable('gh'), ['api', `repos/${repo}`]));
+      let release = null;
+      try { const data = JSON.parse(await run(executable('gh'), ['api', `repos/${repo}/releases/latest`])); release = { tag: data.tag_name, name: data.name, url: data.html_url }; } catch { /* A repository need not have a release. */ }
+      const result = { repository: details.full_name, url: details.html_url, defaultBranch: details.default_branch, release, installation: 'Updates are review-only until a publisher verification key and recovery path are configured.' };
+      event('notice', result); return result;
+    },
+    'usage/open': async () => { await openBrowser('https://chatgpt.com/settings/usage'); return {}; },
+    'restart/check': async () => { await checkRestart(); return { required: restartRequired }; }
+  };
+  const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.png': 'image/png' };
+  const server = http.createServer(async (request, response) => {
+    try {
+      if (request.headers.host !== new URL(origin).host || (request.headers.origin && request.headers.origin !== origin)) { response.writeHead(403).end(); return; }
+      const url = new URL(request.url, origin);
+      response.setHeader('Cache-Control', 'no-store');
+      response.setHeader('X-Content-Type-Options', 'nosniff');
+      response.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
+      if (url.pathname === '/' && request.method === 'GET') {
+        const source = await fs.readFile(path.join(root, 'app', 'public', 'index.html'), 'utf8');
+        response.setHeader('Set-Cookie', `volterra_session=${session}; HttpOnly; SameSite=Strict; Path=/`);
+        response.writeHead(200, { 'Content-Type': mime['.html'] }).end(source.replace('SESSION_TOKEN', session)); return;
+      }
+      if (url.pathname.startsWith('/api/')) {
+        if (!request.headers.cookie?.split(';').some(value => value.trim() === `volterra_session=${session}`)) { response.writeHead(403).end(); return; }
+        if (url.pathname === '/api/state' && request.method === 'GET') { response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(snapshot())); return; }
+        if (url.pathname === '/api/events' && request.method === 'GET') {
+          response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Connection': 'keep-alive' });
+          clients.add(response); response.write(`data: ${JSON.stringify({ type: 'state', data: snapshot() })}\n\n`);
+          const keepalive = setInterval(() => response.write(': keepalive\n\n'), 20_000);
+          request.on('close', () => { clearInterval(keepalive); clients.delete(response); }); return;
+        }
+        if (request.method !== 'POST' || request.headers['x-volterra-client'] !== session || !request.headers['content-type']?.startsWith('application/json')) { response.writeHead(403).end(); return; }
+        let body = ''; for await (const chunk of request) { body += chunk; if (body.length > 1_200_000) throw new Error('Request too large.'); }
+        const action = actions[url.pathname.slice(5)]; if (!action) { response.writeHead(404).end(); return; }
+        const result = await action(body ? JSON.parse(body) : {});
+        response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(result || {})); return;
+      }
+      const assets = { '/app.js': path.join(root, 'app/public/app.js'), '/style.css': path.join(root, 'app/public/style.css') };
+      for (const screen of ['desktop', 'system', 'maintenance', 'connections']) assets[`/design/${screen}.png`] = path.join(root, `design/approved-v1/${screen}.png`);
+      const asset = assets[url.pathname];
+      if (!asset || request.method !== 'GET') { response.writeHead(404).end(); return; }
+      response.writeHead(200, { 'Content-Type': mime[path.extname(asset)] }); response.end(await fs.readFile(asset));
+    } catch (error) {
+      if (!response.headersSent) response.writeHead(400, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify({ error: redact(error.message) }));
+    }
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
+  origin = `http://127.0.0.1:${server.address().port}`;
+  const restartTimer = setInterval(checkRestart, 30_000); restartTimer.unref();
+  if (state.authMode === 'siwc') { const credential = await readCredential(); if (credential) account = { type: 'chatgpt', email: credential.email, source: 'This app’s ChatGPT plan authorization' }; }
+  return { server, origin, state, actions, snapshot, close: async () => { clearInterval(restartTimer); auth.cancel(); await codex.stop(); for (const client of clients) client.end(); await new Promise(resolve => server.close(resolve)); } };
+}
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try { const application = await createApplication(); process.stdout.write(`Microsoft Volterra workspace: ${application.origin}\n`); for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, async () => { await application.close(); process.exit(0); }); }
+  catch (error) { process.stderr.write(redact(error.message) + '\n'); process.exit(1); }
+}

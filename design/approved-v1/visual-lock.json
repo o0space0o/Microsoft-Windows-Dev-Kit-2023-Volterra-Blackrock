@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "status": "Four approved reference images locked; image-based interactive prototype under construction",
+  "approved_by": "User in this chat",
+  "reference_viewport": {
+    "width": 1672,
+    "height": 941
+  },
+  "images": [
+    {
+      "file": "desktop.png",
+      "sha256": "6DB4C93D32C30B60965AF271617A2587F432D607792E75C6D4F4604A19582B96"
+    },
+    {
+      "file": "system.png",
+      "sha256": "C9FB03B6AF4C4EBFA34B341DC61B14D65C99042F2F82D4EAA693FA383F962A85"
+    },
+    {
+      "file": "maintenance.png",
+      "sha256": "062F42D998E89969D781C1B91A64FA2893C98DBFBDC8F8B4B36C40CAC41F7264"
+    },
+    {
+      "file": "connections.png",
+      "sha256": "658A9EBDDBAAE7C9EFBAFA73A6C3EFBC389532E001EA07193AE869125C34D687"
+    }
+  ],
+  "requirements": [
+    "Keep the approved image files byte-identical.",
+    "Treat their composition, background, icon appearance, material treatment, typography and spacing as the implementation reference.",
+    "Use sentence case, preserving proper names and technical abbreviations.",
+    "Compare actual rendered UI to the approved reference at the reference viewport before claiming visual equivalence.",
+    "Do not promise pixel-identical rendering across different resolutions, display scaling, fonts or graphics stacks.",
+    "Put new connection and project screens in separate assets; they do not replace the three approved views and require their own visual review."
+  ],
+  "unresolved": [
+    "Actual font identification and extraction of reusable native assets",
+    "Interactive states not represented by the approved screenshots",
+    "Rendering on Validation OS and the actual Dev Kit"
+  ]
+}

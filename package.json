@@ -1,0 +1,9 @@
+{
+  "name": "volterra-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Private Validation OS development shell and local Codex workspace",
+  "scripts": { "start": "node app/server.mjs", "test": "node --test test/*.test.mjs" },
+  "engines": { "node": ">=22" }
+}

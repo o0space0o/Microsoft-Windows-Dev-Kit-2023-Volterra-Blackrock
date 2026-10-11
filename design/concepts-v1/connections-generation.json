@@ -1,0 +1,8 @@
+{
+  "status": "Approved by the user and copied byte-identically to approved-v1",
+  "generation_mode": "Built-in image generation",
+  "prompt_file": "connections-prompt.txt",
+  "style_reference": "../approved-v1/maintenance.png",
+  "output_file": "connections.png",
+  "implementation_status": "Not implemented; no live accounts connected"
+}
