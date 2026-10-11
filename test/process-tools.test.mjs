@@ -110,6 +110,46 @@ test('missing, contradictory, duplicate and unsupported process readings fail cl
   assert.equal(maximum.status, 'passed'); assert.equal(maximum.processes[0].workingSetBytes, '9223372036854775807');
 });
 
+test('missing process rows cannot inflate totals or be hidden by a literal filter', async () => {
+  const missingFirst = Array(2); missingFirst[1] = reading();
+  const missingSecond = Array(2); missingSecond[0] = reading({ sessionId: null, workingSetBytes: null });
+  for (const processes of [Array(2), missingFirst, missingSecond, [reading(), undefined], [null]]) {
+    for (const filter of ['', '[app]', 'no matches']) {
+      const result = await inspectProcesses(filter, async (...args) => { assert.deepEqual(args, []); return evidence({ processes }); });
+      assert.equal(result.status, 'blocked'); assert.deepEqual(result.processes, []);
+      for (const key of ['totalCount', 'matchedCount', 'unreportedSessionCount', 'unreportedWorkingSetCount']) assert.equal(result[key], undefined);
+      const report = processReport(result);
+      assert.match(report, /blocked.*incomplete or duplicate readings/);
+      assert.doesNotMatch(report, /Live process inventory|processes read|No processes were reported/);
+    }
+  }
+});
+
+test('complete inventories count actual rows and independently unreported fields even when no rows match', async () => {
+  const raw = evidence({ processes: [reading({ pid: 0, name: 'Idle fixture', sessionId: 0, workingSetBytes: '0' }),
+    reading({ sessionId: null }), reading({ pid: 124, name: 'Unknown working set', workingSetBytes: null })] });
+  for (const filter of ['', 'no matches']) {
+    const result = await inspectProcesses(filter, async () => raw);
+    assert.equal(result.status, 'passed'); assert.equal(result.totalCount, 3);
+    assert.equal(result.matchedCount, filter ? 0 : 3);
+    assert.equal(result.unreportedSessionCount, 1); assert.equal(result.unreportedWorkingSetCount, 1);
+    if (!filter) {
+      const idle = result.processes.find(value => value.pid === 0);
+      assert.equal(idle.sessionId, 0); assert.equal(idle.workingSetBytes, '0');
+      assert.equal(result.processes.find(value => value.pid === 123).workingSetBytes, '9007199254740993');
+      assert.equal(result.processes.find(value => value.pid === 124).workingSetBytes, null);
+    }
+  }
+  const empty = await inspectProcesses('', async () => evidence({ processes: [] }));
+  assert.equal(empty.status, 'passed'); assert.equal(empty.totalCount, 0); assert.equal(empty.matchedCount, 0);
+  assert.equal(empty.unreportedSessionCount, 0); assert.equal(empty.unreportedWorkingSetCount, 0);
+  const largest = Array.from({ length: 4096 }, (_, pid) => reading({ pid, sessionId: null, workingSetBytes: null }));
+  const result = await inspectProcesses('no matches', async () => evidence({ processes: largest }));
+  assert.equal(result.status, 'passed'); assert.equal(result.totalCount, 4096); assert.equal(result.matchedCount, 0);
+  assert.equal(result.unreportedSessionCount, 4096); assert.equal(result.unreportedWorkingSetCount, 4096);
+  assert.deepEqual(result.processes, []);
+});
+
 test('private extras are discarded and collection errors or sensitive names are redacted before saving', async () => {
   const result = await inspectProcesses('', async () => evidence({ accepted: true, processes: [reading({ commandLine: 'Private fixture arguments',
     executablePath: 'Private fixture path', owner: 'Private fixture account', environment: 'Private fixture token' })] }));
@@ -186,6 +226,34 @@ test('a policy-blocked process query is saved with its prerequisite and clears t
     const result = await app.actions['agent/send']({ text: 'show processes' });
     assert.equal(result.status, 'blocked'); assert.deepEqual(result.processes, []); assert.equal(app.snapshot().systemTool, null);
     assert.ok(app.snapshot().journal.some(entry => entry.type === 'output' && entry.data.delta?.includes('Script execution is disabled by policy.')));
+  } finally { await app.close(); }
+});
+
+test('incomplete process queries save blocked diagnostics across restart and recover without phantom counts', async () => {
+  let calls = 0;
+  const partial = Array(2); partial[0] = reading();
+  const options = { port: 0, codex: new FakeCodex(), autostart: false, processCollector: async () => {
+    calls++;
+    return evidence({ processes: calls === 1 ? Array(2) : calls === 2 ? partial : [reading()] });
+  } };
+  let app = await createApplication(options);
+  try {
+    const blockedOutputs = () => app.snapshot().journal.filter(entry => entry.type === 'output'
+      && entry.data.delta?.startsWith('Process inventory is blocked.'));
+    const before = blockedOutputs().length, beforeCodexCalls = options.codex.calls.length;
+    for (const text of ['show processes', 'show processes matching [app]']) {
+      const result = await app.actions['agent/send']({ text });
+      assert.equal(result.status, 'blocked'); assert.equal(result.totalCount, undefined);
+      assert.deepEqual(result.processes, []); assert.equal(app.snapshot().systemTool, null);
+    }
+    const saved = blockedOutputs().slice(before); assert.equal(saved.length, 2);
+    assert.equal(options.codex.calls.length, beforeCodexCalls);
+    await app.close(); app = await createApplication({ ...options, codex: new FakeCodex() });
+    for (const output of saved) assert.ok(app.snapshot().journal.some(entry => entry.data?.itemId === output.data.itemId));
+    const result = await app.actions['agent/send']({ text: 'show processes matching [app]' });
+    assert.equal(result.status, 'passed'); assert.equal(result.totalCount, 1); assert.equal(result.matchedCount, 1);
+    assert.equal(result.processes[0].workingSetBytes, '9007199254740993'); assert.equal(calls, 3);
+    assert.equal(app.snapshot().systemTool, null);
   } finally { await app.close(); }
 });
 

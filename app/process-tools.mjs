@@ -41,7 +41,8 @@ export async function inspectProcesses(filter = '', collect = collectProcesses) 
     }
     if (raw.error !== null) throw new Error('The process collector returned conflicting failure evidence.');
     const identities = new Set();
-    const all = raw.processes.map(reading => {
+    // Validate every row before filtering; missing positions must not inflate totals.
+    const all = Array.from(raw.processes, reading => {
       if (!integer(reading?.pid) || identities.has(reading.pid) || typeof reading.name !== 'string' || !reading.name.trim()
         || reading.name.length > 512 || /[\u0000-\u001f\u007f]/.test(reading.name)
         || !(reading.sessionId === null || integer(reading.sessionId))
