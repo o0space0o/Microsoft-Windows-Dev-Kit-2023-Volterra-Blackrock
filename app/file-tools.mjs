@@ -65,7 +65,7 @@ export async function collectFiles(directory, { filesystem = fs } = {}) {
   if (before.some((value, index) => value !== after[index]) || await filesystem.realpath(directory) !== workspace) throw new Error('The workspace changed during file inventory. Refresh the reading.');
   const currentProtected = await privateStatePaths(filesystem);
   if (protectedPaths.length !== currentProtected.length || protectedPaths.some((value, index) => path.relative(value, currentProtected[index]) !== '')) throw new Error('The private state directory changed during file inventory. Refresh the reading.');
-  return { version: 1, kind: 'files', requestedWorkspace: directory, workspace, observedAt: new Date().toISOString(),
+  return { version: 1, kind: 'files', status: 'passed', error: null, requestedWorkspace: directory, workspace, observedAt: new Date().toISOString(),
     system: { platform: process.platform, release: os.release(), runtimeArchitecture: process.arch }, excludedCount, entries };
 }
 
@@ -74,14 +74,22 @@ export async function inspectFiles(directory, filter = '', collect = collectFile
   try {
     if (typeof directory !== 'string' || !path.isAbsolute(directory)) throw new Error('An absolute workspace folder is required.');
     const raw = await collect(directory);
-    if (raw?.version !== 1 || raw.kind !== 'files' || raw.requestedWorkspace !== directory
+    if (raw?.version !== 1 || raw.kind !== 'files' || !['passed', 'blocked'].includes(raw.status) || raw.requestedWorkspace !== directory
       || typeof raw.workspace !== 'string' || !path.isAbsolute(raw.workspace) || raw.workspace.length > 4096
       || !validTime(raw.observedAt) || !raw.system
-      || ['platform', 'release', 'runtimeArchitecture'].some(key => typeof raw.system[key] !== 'string')
+      || ['platform', 'release', 'runtimeArchitecture'].some(key => typeof raw.system[key] !== 'string' || raw.system[key].length > 128)
       || !Number.isInteger(raw.excludedCount) || raw.excludedCount < 0 || raw.excludedCount > 4096
       || !Array.isArray(raw.entries) || raw.entries.length + raw.excludedCount > 4096) throw new Error('The file collector returned unsupported evidence.');
+    if (raw.status === 'blocked') {
+      if (raw.entries.length || raw.excludedCount || typeof raw.error?.stage !== 'string' || !raw.error.stage.trim()
+        || typeof raw.error.message !== 'string' || !raw.error.message.trim()) throw new Error('The file collector returned ambiguous failure evidence.');
+      return { status: 'blocked', observedAt: raw.observedAt, entries: [],
+        error: { stage: text(raw.error.stage), message: text(raw.error.message) } };
+    }
+    if (raw.error !== null) throw new Error('The file collector returned conflicting failure evidence.');
     const names = new Set();
-    const all = raw.entries.map(entry => {
+    // Validate every position before filtering or counting; array holes are missing readings.
+    const all = Array.from(raw.entries, entry => {
       if (!validName(entry?.name) || excluded(entry.name) || !['File', 'Folder', 'Link', 'Other'].includes(entry.kind) || !validTime(entry.modifiedAt)
         || (entry.kind === 'File' ? typeof entry.sizeBytes !== 'string' || !/^(?:0|[1-9][0-9]{0,19})$/.test(entry.sizeBytes) || BigInt(entry.sizeBytes) > 0xffff_ffff_ffff_ffffn : entry.sizeBytes !== null)) {
         throw new Error('The file collector returned incomplete entry readings.');

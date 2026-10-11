@@ -12,7 +12,7 @@ const { createApplication } = await import('../app/server.mjs');
 const { describeProgress } = await import('../app/public/progress.js');
 const modifiedAt = '2026-10-11T18:00:00.000Z';
 const entry = { name: 'Example [source].txt', kind: 'File', sizeBytes: '9007199254740993', modifiedAt };
-const evidence = (workspace = directory, patch = {}) => ({ version: 1, kind: 'files', requestedWorkspace: workspace, workspace,
+const evidence = (workspace = directory, patch = {}) => ({ version: 1, kind: 'files', status: 'passed', error: null, requestedWorkspace: workspace, workspace,
   observedAt: modifiedAt, system: { platform: 'win32', release: 'fixture', runtimeArchitecture: 'arm64' }, excludedCount: 2,
   entries: [entry, { name: 'Folder fixture', kind: 'Folder', sizeBytes: null, modifiedAt }, { name: 'Link fixture', kind: 'Link', sizeBytes: null, modifiedAt }], ...patch });
 const stats = (kind = 'Folder', patch = {}) => ({ dev: 1n, ino: 2n, mtimeNs: 3n, ctimeNs: 4n, mtime: new Date(modifiedAt), size: 0n,
@@ -54,6 +54,7 @@ test('collection uses bounded nonrecursive enumeration and exact lstat sizes wit
     'Folder fixture': stats(), 'Link fixture': stats('Link'), 'Other fixture': stats('Other')
   });
   const result = await collectFiles(directory, { filesystem: fixture.filesystem });
+  assert.equal(result.status, 'passed'); assert.equal(result.error, null);
   assert.equal(result.entries[0].sizeBytes, '9007199254740993');
   assert.deepEqual(result.entries.map(value => value.kind), ['File', 'Folder', 'Link', 'Other']);
   assert.ok(result.entries.slice(1).every(value => value.sizeBytes === null));
@@ -208,6 +209,64 @@ test('malformed or excluded collector evidence becomes blocked without partial e
   assert.equal(empty.status, 'passed'); assert.match(fileReport(empty), /No included root entries/);
 });
 
+test('missing file rows cannot inflate totals or disappear behind a literal filter', async () => {
+  const sparse = Array(2); sparse[1] = entry;
+  for (const entries of [Array(1), sparse, [undefined, entry], [entry, null]]) {
+    for (const filter of ['', 'no-match']) {
+      const result = await inspectFiles(directory, filter, async () => evidence(directory, { entries }));
+      assert.equal(result.status, 'blocked'); assert.deepEqual(result.entries, []);
+      assert.equal(result.totalCount, undefined); assert.equal(result.matchedCount, undefined);
+      assert.match(fileReport(result), /incomplete entry readings/);
+    }
+  }
+});
+
+test('conflicting file failure evidence is rejected before examining or filtering rows', async () => {
+  const unreadable = { get name() { throw new Error('Entry metadata was inspected.'); } };
+  const error = { stage: 'Directory query', message: 'Access denied.' };
+  for (const patch of [{ status: undefined }, { status: 'unknown' }, { error: undefined }, { error },
+    { status: 'blocked', error }, { status: 'blocked', error, entries: Array(1) },
+    { status: 'blocked', error, entries: [], excludedCount: 1 }]) {
+    const result = await inspectFiles(directory, 'no-match', async () => evidence(directory, { entries: [unreadable], ...patch }));
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.entries, []);
+    assert.equal(result.totalCount, undefined); assert.doesNotMatch(fileReport(result), /Entry metadata was inspected/);
+  }
+});
+
+test('a complete file provider failure retains redacted diagnostics while blank stages or messages remain blocked', async () => {
+  const failed = evidence(directory, { status: 'blocked', excludedCount: 0, entries: [],
+    error: { stage: 'Directory query', message: 'Access denied. Bearer fixture-secret' } });
+  const result = await inspectFiles(directory, 'no-match', async () => failed);
+  assert.equal(result.status, 'blocked'); assert.deepEqual(result.entries, []); assert.equal(result.observedAt, modifiedAt);
+  assert.equal(result.error.stage, 'Directory query'); assert.match(fileReport(result), /Access denied/);
+  assert.doesNotMatch(fileReport(result), /fixture-secret/); assert.equal(result.excludedCount, undefined);
+  for (const error of [null, {}, { stage: '', message: 'Denied.' }, { stage: '   ', message: 'Denied.' },
+    { stage: 'Directory query', message: '' }, { stage: 'Directory query', message: '   ' }]) {
+    const malformed = await inspectFiles(directory, '', async () => ({ ...failed, error }));
+    assert.equal(malformed.status, 'blocked'); assert.match(malformed.error.message, /ambiguous failure evidence/);
+  }
+});
+
+test('genuine empty and zero-byte file readings retain exact counts and only whitelisted metadata', async () => {
+  const empty = await inspectFiles(directory, '', async () => evidence(directory, { entries: [], excludedCount: 0 }));
+  assert.equal(empty.status, 'passed'); assert.equal(empty.totalCount, 0); assert.equal(empty.matchedCount, 0);
+  assert.equal(empty.excludedCount, 0); assert.match(fileReport(empty), /No included root entries/);
+  const zero = { ...entry, sizeBytes: '0', content: 'Unrequested content', target: 'Unverified target' };
+  const result = await inspectFiles(directory, '[source]', async () => evidence(directory, { entries: [zero], secret: 'Unrequested field' }));
+  assert.equal(result.status, 'passed'); assert.equal(result.totalCount, 1); assert.equal(result.matchedCount, 1);
+  assert.deepEqual(result.entries, [{ ...entry, sizeBytes: '0' }]); assert.equal(result.secret, undefined);
+  assert.match(fileReport(result), /Size: 0 bytes/); assert.doesNotMatch(fileReport(result), /Unrequested|Unverified target/);
+});
+
+test('null file collector failures leave usable blocked diagnostics', async () => {
+  for (const collect of [async () => null, async () => { throw null; }, async () => { throw undefined; }]) {
+    const result = await inspectFiles(directory, '', collect);
+    assert.equal(result.status, 'blocked'); assert.deepEqual(result.entries, []);
+    assert.equal(result.error.stage, 'Workspace file inventory'); assert.ok(result.error.message);
+    assert.match(fileReport(result), /File inventory is blocked/);
+  }
+});
+
 test('report output is bounded and credential-like names are redacted', async () => {
   const result = await inspectFiles(directory, '', async () => evidence(directory, {
     entries: Array.from({ length: 42 }, (_, index) => ({ ...entry, name: 'n'.repeat(245) + index }))
@@ -280,6 +339,25 @@ test('unavailable file metadata leaves a saved blocked report and clears checkin
     const result = await app.actions['agent/send']({ text: 'show files' });
     assert.equal(result.status, 'blocked'); assert.deepEqual(result.entries, []); assert.equal(app.snapshot().systemTool, null);
     assert.ok(app.snapshot().journal.some(value => value.type === 'output' && value.data.delta?.includes('File inventory is blocked.')));
+  } finally { await app.close(); }
+});
+
+test('missing file rows save a blocked chat report across restart and a fresh reading can recover', async () => {
+  const fake = new FakeCodex();
+  let app = await createApplication({ port: 0, codex: fake, autostart: false,
+    fileCollector: async workspace => evidence(workspace, { entries: Array(1) }) });
+  try {
+    const before = fake.calls.length, result = await app.actions['agent/send']({ text: 'show files matching no-match' });
+    assert.equal(result.status, 'blocked'); assert.equal(app.snapshot().systemTool, null); assert.equal(fake.calls.length, before);
+    const output = app.snapshot().journal.find(value => value.type === 'output' && value.data.delta?.includes('incomplete entry readings'));
+    assert.ok(output); assert.match(output.data.delta, /File inventory is blocked/);
+    await app.close();
+    const restored = new FakeCodex();
+    app = await createApplication({ port: 0, codex: restored, autostart: false, fileCollector: async workspace => evidence(workspace) });
+    assert.ok(app.snapshot().journal.some(value => value.data?.itemId === output.data.itemId));
+    const resumedCalls = restored.calls.length, recovered = await app.actions['agent/send']({ text: 'show files matching [source]' });
+    assert.equal(recovered.status, 'passed'); assert.equal(recovered.totalCount, 3); assert.equal(recovered.matchedCount, 1);
+    assert.equal(app.snapshot().systemTool, null); assert.equal(restored.calls.length, resumedCalls);
   } finally { await app.close(); }
 });
 
