@@ -10,7 +10,7 @@ process.env.VOLTERRA_STATE_DIR = path.join(directory, 'state');
 const { memoryQuery, collectMemory, inspectMemory, memoryReport } = await import('../app/memory-tools.mjs');
 const { createApplication } = await import('../app/server.mjs');
 const { describeProgress } = await import('../app/public/progress.js');
-const evidence = (patch = {}) => ({ version: 1, kind: 'memory', observedAt: '2026-10-11T18:00:00.000Z',
+const evidence = (patch = {}) => ({ version: 1, kind: 'memory', status: 'passed', error: null, observedAt: '2026-10-11T18:00:00.000Z',
   system: { platform: 'win32', release: 'fixture', runtimeArchitecture: 'arm64' }, totalBytes: '17179869184', freeBytes: '4294967296', ...patch });
 
 class FakeCodex extends EventEmitter {
@@ -38,6 +38,7 @@ test('the collector invokes both getters once without arguments and preserves by
     readFree: (...args) => { calls.push('free'); assert.deepEqual(args, []); return 4294967296; }
   });
   assert.deepEqual(calls, ['total', 'free']); assert.equal(result.version, 1); assert.equal(result.kind, 'memory');
+  assert.equal(result.status, 'passed'); assert.equal(result.error, null);
   assert.equal(result.totalBytes, '17179869184'); assert.equal(result.freeBytes, '4294967296');
   assert.ok(Number.isFinite(Date.parse(result.observedAt))); assert.equal(result.nonFreeBytes, undefined);
 });
@@ -75,6 +76,46 @@ test('malformed and inconsistent evidence fails closed with no partial capacity'
     const result = await inspectMemory(async () => raw);
     assert.equal(result.status, 'blocked'); assert.equal(result.totalBytes, undefined); assert.equal(result.freeBytes, undefined);
     assert.equal(result.nonFreeBytes, undefined); assert.match(memoryReport(result), /blocked/);
+  }
+});
+
+test('memory success requires consistent failure metadata before byte readings are examined', async () => {
+  const error = { stage: 'Free memory query', message: 'API access denied.' };
+  for (const patch of [{ status: undefined }, { status: 'unknown' }, { error: undefined }, { error: false }, { error }]) {
+    const raw = evidence(patch);
+    Object.defineProperty(raw, 'totalBytes', { get() { throw new Error('Byte reading was accessed.'); } });
+    const result = await inspectMemory(async () => raw);
+    assert.equal(result.status, 'blocked'); assert.equal(result.totalBytes, undefined); assert.equal(result.freeBytes, undefined);
+    assert.equal(result.nonFreeBytes, undefined); assert.doesNotMatch(memoryReport(result), /Byte reading was accessed/);
+  }
+  const failedZero = await inspectMemory(async () => evidence({ status: 'blocked', error, freeBytes: '0' }));
+  assert.equal(failedZero.status, 'blocked'); assert.equal(failedZero.freeBytes, undefined); assert.equal(failedZero.nonFreeBytes, undefined);
+  assert.doesNotMatch(memoryReport(failedZero), /Reported free memory/);
+});
+
+test('memory provider failures retain redacted diagnostics and reject placeholders or partial byte counts', async () => {
+  const failed = evidence({ status: 'blocked', totalBytes: null, freeBytes: null,
+    error: { stage: 'Free memory query', message: 'API access denied. Bearer fixture-secret ' + 'x'.repeat(1024) } });
+  const result = await inspectMemory(async () => failed);
+  assert.equal(result.status, 'blocked'); assert.equal(result.observedAt, failed.observedAt); assert.equal(result.error.stage, 'Free memory query');
+  assert.equal(result.totalBytes, undefined); assert.equal(result.freeBytes, undefined); assert.equal(result.nonFreeBytes, undefined);
+  assert.match(memoryReport(result), /API access denied/); assert.doesNotMatch(memoryReport(result), /fixture-secret/);
+  assert.ok(result.error.message.length <= 512);
+  for (const patch of [{ totalBytes: '1024' }, { freeBytes: '0' }, { totalBytes: 0 }, { totalBytes: undefined }, { freeBytes: undefined },
+    { error: null }, { error: {} }, { error: { stage: '', message: 'Denied.' } }, { error: { stage: '   ', message: 'Denied.' } },
+    { error: { stage: 'Memory query', message: '' } }, { error: { stage: 'Memory query', message: '   ' } }]) {
+    const ambiguous = await inspectMemory(async () => ({ ...failed, ...patch }));
+    assert.equal(ambiguous.status, 'blocked'); assert.equal(ambiguous.totalBytes, undefined); assert.equal(ambiguous.freeBytes, undefined);
+    assert.equal(ambiguous.nonFreeBytes, undefined); assert.match(ambiguous.error.message, /ambiguous failure evidence/);
+  }
+});
+
+test('null memory collector failures retain usable diagnostics without invented capacity', async () => {
+  for (const collect of [async () => null, async () => { throw null; }, async () => { throw undefined; }]) {
+    const result = await inspectMemory(collect);
+    assert.equal(result.status, 'blocked'); assert.equal(result.totalBytes, undefined); assert.equal(result.freeBytes, undefined);
+    assert.equal(result.nonFreeBytes, undefined); assert.equal(result.error.stage, 'System memory readings'); assert.ok(result.error.message);
+    assert.match(memoryReport(result), /System memory readings are blocked/);
   }
 });
 
@@ -159,6 +200,29 @@ test('a blocked memory reading is saved and clears transient checking', async ()
     const result = await app.actions['agent/send']({ text: 'show system memory' });
     assert.equal(result.status, 'blocked'); assert.equal(app.snapshot().systemTool, null);
     assert.ok(app.snapshot().journal.some(entry => entry.type === 'output' && entry.data.delta?.includes('System memory readings are blocked.')));
+  } finally { await app.close(); }
+});
+
+test('memory provider diagnostics survive chat restart and a successful zero-free reading can recover', async () => {
+  const fake = new FakeCodex();
+  let app = await createApplication({ port: 0, codex: fake, autostart: false,
+    memoryCollector: async () => evidence({ status: 'blocked', totalBytes: null, freeBytes: null,
+      error: { stage: 'Free memory query', message: 'API access denied.' } }) });
+  try {
+    const before = fake.calls.length, wasPaused = app.automation.saved.paused;
+    const result = await app.actions['agent/send']({ text: 'show memory' });
+    assert.equal(result.status, 'blocked'); assert.equal(result.totalBytes, undefined); assert.equal(result.freeBytes, undefined);
+    assert.equal(app.snapshot().systemTool, null); assert.equal(fake.calls.length, before); assert.equal(app.automation.saved.paused, wasPaused);
+    const output = app.snapshot().journal.find(entry => entry.type === 'output' && entry.data.delta?.includes('Free memory query: API access denied.'));
+    assert.ok(output); assert.match(output.data.delta, /System memory readings are blocked/);
+    await app.close();
+    const restored = new FakeCodex();
+    app = await createApplication({ port: 0, codex: restored, autostart: false, memoryCollector: async () => evidence({ freeBytes: '0' }) });
+    assert.ok(app.snapshot().journal.some(entry => entry.data?.itemId === output.data.itemId));
+    const resumedCalls = restored.calls.length, recovered = await app.actions['agent/send']({ text: 'show system memory' });
+    assert.equal(recovered.status, 'passed'); assert.equal(recovered.freeBytes, '0'); assert.equal(recovered.nonFreeBytes, recovered.totalBytes);
+    assert.match(memoryReport(recovered), /Reported free memory: 0\.00 GiB \(0 bytes\)/);
+    assert.equal(app.snapshot().systemTool, null); assert.equal(restored.calls.length, resumedCalls); assert.equal(app.automation.saved.paused, wasPaused);
   } finally { await app.close(); }
 });
 

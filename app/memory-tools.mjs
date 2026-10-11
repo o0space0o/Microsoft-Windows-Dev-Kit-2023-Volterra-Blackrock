@@ -17,18 +17,27 @@ export async function collectMemory({ readTotal = () => os.totalmem(), readFree 
   // These two getter calls are sequential readings, not an atomic allocation snapshot.
   const totalBytes = nativeBytes(await readTotal());
   const freeBytes = nativeBytes(await readFree());
-  return { version: 1, kind: 'memory', observedAt: new Date().toISOString(),
+  return { version: 1, kind: 'memory', status: 'passed', error: null, observedAt: new Date().toISOString(),
     system: { platform: process.platform, release: os.release(), runtimeArchitecture: process.arch }, totalBytes, freeBytes };
 }
 
 export async function inspectMemory(collect = collectMemory) {
   try {
     const raw = await collect();
-    if (raw?.version !== 1 || raw.kind !== 'memory'
+    if (raw?.version !== 1 || raw.kind !== 'memory' || !['passed', 'blocked'].includes(raw.status)
       || typeof raw.observedAt !== 'string' || raw.observedAt.length > 40 || !Number.isFinite(Date.parse(raw.observedAt))
-      || !raw.system || ['platform', 'release', 'runtimeArchitecture'].some(key => typeof raw.system[key] !== 'string' || raw.system[key].length > 128)
-      || ['totalBytes', 'freeBytes'].some(key => typeof raw[key] !== 'string' || !/^(?:0|[1-9][0-9]{0,15})$/.test(raw[key]))) {
+      || !raw.system || ['platform', 'release', 'runtimeArchitecture'].some(key => typeof raw.system[key] !== 'string' || raw.system[key].length > 128)) {
       throw new Error('The memory collector returned unsupported evidence.');
+    }
+    if (raw.status === 'blocked') {
+      if (raw.totalBytes !== null || raw.freeBytes !== null || typeof raw.error?.stage !== 'string' || !raw.error.stage.trim()
+        || typeof raw.error.message !== 'string' || !raw.error.message.trim()) throw new Error('The memory collector returned ambiguous failure evidence.');
+      return { status: 'blocked', observedAt: raw.observedAt,
+        error: { stage: text(raw.error.stage), message: text(raw.error.message) } };
+    }
+    if (raw.error !== null) throw new Error('The memory collector returned conflicting failure evidence.');
+    if (['totalBytes', 'freeBytes'].some(key => typeof raw[key] !== 'string' || !/^(?:0|[1-9][0-9]{0,15})$/.test(raw[key]))) {
+      throw new Error('The memory collector returned unsupported byte readings.');
     }
     const total = BigInt(raw.totalBytes), free = BigInt(raw.freeBytes);
     if (total === 0n || total > maximumBytes || free > total) throw new Error('The system memory API returned inconsistent byte counts.');
