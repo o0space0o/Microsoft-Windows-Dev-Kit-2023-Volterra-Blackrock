@@ -1,7 +1,8 @@
 #Requires -RunAsAdministrator
 [CmdletBinding()]
-param([ValidateSet('Prepare','Start','Inspect','Collect')][string]$Phase = 'Prepare')
+param([ValidateSet('Prepare','Start','Inspect','Collect')][string]$Phase = 'Prepare',[switch]$RebuildFoundation)
 $ErrorActionPreference = 'Stop'
+if($Phase-in@('Prepare','Start','Collect')-and-not$RebuildFoundation){throw 'Creating, starting or collecting the retained 006 servicing foundation requires explicit -RebuildFoundation.'}
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $owned = Join-Path $workspace 'build\development-006'
 $boot = Join-Path $owned 'boot.vhdx'; $data = Join-Path $owned 'data.vhdx'

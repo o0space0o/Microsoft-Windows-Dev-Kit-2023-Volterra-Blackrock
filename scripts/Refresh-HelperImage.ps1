@@ -1,7 +1,7 @@
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
-    [ValidatePattern('^development-[0-9]{3}$')][string]$BuildName='development-007',
+    [Parameter(Mandatory=$true)][ValidatePattern('^development-[0-9]{3}$')][string]$BuildName,
     [string]$SourceReceipt
 )
 $ErrorActionPreference='Stop'
@@ -9,8 +9,8 @@ $workspace=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $base=Join-Path $workspace 'build\development-006'
 $build=Join-Path $workspace ('build\'+$BuildName)
 function Save($value) { $value | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $build 'refresh-result.json') -Encoding utf8 }
+if (Test-Path -LiteralPath $build) { throw 'A helper refresh build already exists and will not be overwritten.' }
 try {
-    if (Test-Path -LiteralPath $build) { throw 'A helper refresh build already exists and will not be overwritten.' }
     $receipt=Get-Content -LiteralPath (Join-Path $base 'image-receipt.json') -Raw | ConvertFrom-Json
     foreach ($kind in @('boot','install')) {
         if ((Get-FileHash -LiteralPath (Join-Path $base ('output\'+$kind+'.wim'))).Hash -ne $receipt.($kind+'SHA256')) { throw 'The sealed base image hash changed.' }

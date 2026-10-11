@@ -1,7 +1,7 @@
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
-    [ValidatePattern('^development-[0-9]{3}$')][string]$BuildName='development-006',
+    [Parameter(Mandatory=$true)][ValidatePattern('^development-[0-9]{3}$')][string]$BuildName,
     [string]$PrivateBootSource
 )
 $ErrorActionPreference = 'Stop'

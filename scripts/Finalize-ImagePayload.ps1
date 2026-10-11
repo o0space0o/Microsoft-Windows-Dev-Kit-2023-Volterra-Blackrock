@@ -1,12 +1,17 @@
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
-    [ValidatePattern('^development-[0-9]{3}$')][string]$BuildName='development-006',
+    [Parameter(Mandatory=$true)][ValidatePattern('^development-[0-9]{3}$')][string]$BuildName,
     [string]$SourceReceipt
 )
 $ErrorActionPreference = 'Stop'
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $build = Join-Path $workspace ('build\'+$BuildName)
+# Finalized WIMs and accepted media are immutable inputs. An update needs a
+# separately reviewed fresh candidate; never silently re-service current013.
+foreach($seal in @('Finalize-result.json','iso-receipt.json')){
+    if(Test-Path -LiteralPath (Join-Path $build $seal)){throw 'Existing finalized image or ISO proof forbids re-servicing this build.'}
+}
 $dism = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\arm64\DISM\dism.exe'
 function Dism([string]$Name,[string[]]$Arguments) {
     & $dism /English @Arguments "/LogPath:$build\$Name.log" > (Join-Path $build ($Name+'-output.txt'))

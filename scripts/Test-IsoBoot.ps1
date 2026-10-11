@@ -2,14 +2,15 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Prepare','Inspect','Stop')][string]$Phase='Prepare',
-    [ValidatePattern('\Adevelopment-[0-9]{3}\z')][string]$BuildName='development-006'
+    [ValidatePattern('\Adevelopment-[0-9]{3}\z')][string]$BuildName
 )
 $ErrorActionPreference = 'Stop'
+if(-not$BuildName-and$Phase-ne'Inspect'){throw 'Prepare and Stop require an explicit BuildName; only Inspect can select the pinned current media.'}
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $node = Join-Path $workspace 'private\tools\node.exe'
 $plan = $null
 function Read-Plan([string]$SelectedPhase) {
-    $json = & $node (Join-Path $PSScriptRoot 'Plan-IsoBoot.mjs') $BuildName $SelectedPhase
+    $json = if($BuildName){& $node (Join-Path $PSScriptRoot 'Plan-IsoBoot.mjs') $BuildName $SelectedPhase}else{& $node (Join-Path $PSScriptRoot 'Plan-IsoBoot.mjs')}
     if ($LASTEXITCODE -ne 0) { throw 'Selected ISO test receipt/identity validation failed.' }
     return ($json | ConvertFrom-Json)
 }
@@ -48,6 +49,7 @@ function Invoke-InspectionCapture($VM,$Selection,[scriptblock]$Collect) {
 try {
     # This read-only helper validates the selected files before any Hyper-V call.
     $plan = Read-Plan $Phase
+    $BuildName = [string]$plan.buildName
     $owned = $plan.owned
     $vmName = $plan.vmName
     $iso = $plan.iso

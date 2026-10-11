@@ -6,7 +6,7 @@ const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const samePath = (a, b) => typeof a === 'string' && typeof b === 'string'
   && (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
 
-export function isoBootPaths(workspace, buildName = 'development-006') {
+export function isoBootPaths(workspace, buildName) {
   if (typeof buildName !== 'string' || !/^development-[0-9]{3}$/.test(buildName) || buildName.length !== 15) throw new Error('Invalid ISO test BuildName.');
   const build = path.resolve(workspace, 'build', buildName), owned = path.join(build, 'iso-test');
   const isoName = buildName === 'development-006' ? 'Microsoft-Volterra-development-arm64.iso' : `Microsoft-Volterra-${buildName}-arm64.iso`;
@@ -71,7 +71,7 @@ export function bindIsoReceipt(plan, receipt, actual, phase, identity, receiptSH
     bootAccepted: false, runtimeAccepted: false };
 }
 
-export async function readIsoBootPlan(workspace, buildName = 'development-006', phase = 'Prepare') {
+export async function readIsoBootPlan(workspace, buildName, phase = 'Prepare') {
   if (!['Prepare', 'Inspect', 'Stop'].includes(phase)) throw new Error('Invalid ISO test phase.');
   const base = await fs.realpath(workspace), plan = isoBootPaths(base, buildName);
   for (const folder of [plan.build, plan.owned]) await checkPath(base, folder, true);

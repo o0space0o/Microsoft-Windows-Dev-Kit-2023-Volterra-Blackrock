@@ -38,15 +38,22 @@ async function fixture(t, buildName = 'development-007') {
   return { workspace, paths, receipt, read, installIdentity, imageFile, finalFile };
 }
 
-test('006 default identities stay compatible while 007 ISO, VM and disk paths are isolated', () => {
-  const a = isoBootPaths(os.tmpdir()), b = isoBootPaths(os.tmpdir(), 'development-007');
+test('explicit 006 identities stay compatible while omitted build selection refuses', () => {
+  const a = isoBootPaths(os.tmpdir(), 'development-006'), b = isoBootPaths(os.tmpdir(), 'development-007');
   assert.equal(a.buildName, 'development-006');
   assert.equal(a.vmName, 'Microsoft Volterra development ISO test 006');
   assert.equal(path.basename(a.iso), 'Microsoft-Volterra-development-arm64.iso');
   assert.equal(b.vmName, 'Microsoft Volterra development ISO test 007');
   assert.equal(path.basename(b.iso), 'Microsoft-Volterra-development-007-arm64.iso');
   for (const key of ['build', 'owned', 'iso', 'data', 'identityFile', 'receiptFile']) assert.notEqual(a[key], b[key]);
-  for (const value of ['../development-007', 'development-007\n', 'development-007/elsewhere', 'development-7', 'development-007:stream', '', null]) assert.throws(() => isoBootPaths(os.tmpdir(), value), /BuildName/);
+  for (const value of ['../development-007', 'development-007\n', 'development-007/elsewhere', 'development-7', 'development-007:stream', '', null, undefined]) assert.throws(() => isoBootPaths(os.tmpdir(), value), /BuildName/);
+});
+
+test('the exported reader refuses omitted build selection without changing fixture outputs', async t => {
+  const f = await fixture(t), before = (await fs.readdir(f.paths.build)).sort();
+  for (const phase of ['Prepare', 'Inspect', 'Stop']) await assert.rejects(readIsoBootPlan(f.workspace, undefined, phase), /BuildName/);
+  assert.deepEqual((await fs.readdir(f.paths.build)).sort(), before);
+  await assert.rejects(fs.access(f.paths.owned));
 });
 
 test('selection binds the exact ISO bytes and receipt to its image source commit without creating output', async t => {
@@ -62,7 +69,7 @@ test('selection binds the exact ISO bytes and receipt to its image source commit
 
 test('wrong receipt paths, bytes, hashes, architectures and source bindings fail closed', async t => {
   const f = await fixture(t);
-  for (const patch of [{ path: isoBootPaths(f.workspace).iso }, { bytes: f.receipt.bytes + 1 }, { sha256: '0'.repeat(64) },
+  for (const patch of [{ path: isoBootPaths(f.workspace, 'development-006').iso }, { bytes: f.receipt.bytes + 1 }, { sha256: '0'.repeat(64) },
     { architecture: 'x64' }, { privateDevelopmentOnly: false }, { sourceCommit: undefined }, { sourceCommit: 'main' }]) {
     await save(f.paths.receiptFile, { ...f.receipt, ...patch });
     await assert.rejects(f.read('Prepare'), /receipt|commit/);
@@ -85,7 +92,7 @@ test('ISO source binding must agree with successful finalization of this selecte
 test('new identities reject cross-build disks and changed ISO receipt/source binding', async t => {
   const f = await fixture(t), identity = await f.installIdentity();
   assert.equal((await f.read('Inspect')).vmId, id);
-  for (const patch of [{ data: isoBootPaths(f.workspace).data }, { buildName: 'development-006' }, { id: 'not-a-guid' },
+  for (const patch of [{ data: isoBootPaths(f.workspace, 'development-006').data }, { buildName: 'development-006' }, { id: 'not-a-guid' },
     { isoReceiptSHA256: '0'.repeat(64) }, { sourceCommit: '1'.repeat(40) }, { physicalDiskAttached: true }, { network: true }]) {
     await save(f.paths.identityFile, { ...identity, ...patch });
     await assert.rejects(f.read('Inspect'), /identity/);
