@@ -46,6 +46,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
   let origin, sessionCookieName, account = null, activeTurn = null, loadedThread = null, paused = false, pauseRequested = false, restartRequired = false, github = null, runtimeToken = null, runtimeStart, automation, runtimeReady = false;
   let progressPhase = null, progressSince = new Date().toISOString(), lastActivityAt = journal.at(-1)?.time || null, connectionsChecked = false;
   let initialContinuation = null;
+  let initialContinuationPending = false;
   const finalMessages = new Map();
   let systemTool = null;
   const selected = () => state.selected && state.projects[state.selected];
@@ -132,7 +133,9 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     return account;
   }
   async function continueInitialVision() {
-    if (activeTurn || (automation?.saved.enabled && automation.saved.paused)) return;
+    if (automation?.loaded !== true) { initialContinuationPending = true; return; }
+    initialContinuationPending = false;
+    if (activeTurn || automation.saved.paused) return;
     if (initialContinuation) return initialContinuation;
     // Repeated account notifications share startup without resetting an in-flight queue.
     initialContinuation = (async () => {
@@ -389,6 +392,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
   try { github = { login: await run(executable('gh'), ['api', 'user', '--jq', '.login']) }; } catch { github = null; }
   connectionsChecked = true;
   await automation.start(); publish();
+  if (initialContinuationPending) await continueInitialVision();
   if (autostart && !account) event('notice', 'Automatic work is waiting for this OS’s first browser sign-in. No project folder setup is needed.');
   return { server, origin, state, actions, snapshot, automation, close: async () => { automation.close(); clearInterval(restartTimer); auth.cancel(); await codex.stop(); await journalWrites; for (const client of clients) client.end(); await new Promise(resolve => server.close(resolve)); } };
 }

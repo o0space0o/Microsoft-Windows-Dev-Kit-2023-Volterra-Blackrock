@@ -49,6 +49,98 @@ test('an authorization wake before startup cannot run the default task before th
   } finally { next.runner.close(); }
 });
 
+test('invalid saved queue bytes are preserved exactly before a disabled paused queue replaces them', async () => {
+  const { runner, calls } = controller('corrupt-queue'), notices = [];
+  runner.hooks.notice = message => notices.push(message);
+  await fs.mkdir(path.dirname(runner.file), { recursive: true });
+  const original = Buffer.from(', {"private":"NEVER_DISPLAY_ORIGINAL"}');
+  await fs.writeFile(runner.file, original);
+  const neighbors = ['state.json', 'auth.json', 'history.jsonl'];
+  for (const file of neighbors) await fs.writeFile(path.join(path.dirname(runner.file), file), 'Unchanged private fixture');
+  try {
+    await runner.start();
+    assert.deepEqual(calls, []); assert.equal(runner.loaded, true);
+    assert.equal(runner.saved.enabled, false); assert.equal(runner.saved.paused, true); assert.equal(runner.saved.phase, 'paused');
+    assert.equal(runner.saved.pendingOutcome, null); assert.equal(runner.saved.reviewPassed, false);
+    assert.deepEqual(runner.saved.recovery, { version: 1, reason: 'invalid-saved-state', originalBytesPreserved: true });
+    const quarantines = (await fs.readdir(path.dirname(runner.file))).filter(name => name.startsWith('automation-state-quarantine-'));
+    assert.equal(quarantines.length, 1); assert.match(quarantines[0], /^automation-state-quarantine-[a-f\d-]{36}\.json$/);
+    assert.deepEqual(await fs.readFile(path.join(path.dirname(runner.file), quarantines[0])), original);
+    assert.deepEqual(JSON.parse(await fs.readFile(runner.file, 'utf8')), runner.saved);
+    assert.equal(notices.length, 1); assert.match(notices[0], /disabled and paused/);
+    assert.doesNotMatch(JSON.stringify({ notices, saved: runner.saved }), /NEVER_DISPLAY_ORIGINAL|quarantine-|Unexpected token/);
+    for (const file of neighbors) assert.equal(await fs.readFile(path.join(path.dirname(runner.file), file), 'utf8'), 'Unchanged private fixture');
+    const restarted = controller('corrupt-queue');
+    try {
+      await restarted.runner.start(); assert.deepEqual(restarted.calls, []);
+      assert.equal((await fs.readdir(path.dirname(runner.file))).filter(name => name.startsWith('automation-state-quarantine-')).length, 1);
+    } finally { restarted.runner.close(); }
+  } finally { runner.close(); }
+});
+
+test('parse-valid unsafe queue shapes and invalid UTF-8 cannot inherit enabled defaults', async () => {
+  const valid = { version: 1, enabled: true, paused: false, phase: 'idle', task: 0 };
+  const invalid = [null, [], true, {}, { ...valid, version: 2 }, { ...valid, enabled: 'true' }, { ...valid, paused: null },
+    { ...valid, task: -1 }, { ...valid, phase: 'unknown' }, { ...valid, phase: 'paused' }, { ...valid, reviewPassed: 'true' },
+    { ...valid, failures: -1 }, { ...valid, pendingOutcome: { status: 'complete' } }, { ...valid, lastError: {} }];
+  const inputs = invalid.map(value => Buffer.from(JSON.stringify(value)));
+  inputs.push(Buffer.from([0xc3, 0x28]));
+  for (const [index, original] of inputs.entries()) {
+    const { runner, calls } = controller(`corrupt-schema-${index}`); await fs.mkdir(path.dirname(runner.file), { recursive: true });
+    await fs.writeFile(runner.file, original);
+    try {
+      await runner.start(); assert.deepEqual(calls, []); assert.equal(runner.saved.enabled, false); assert.equal(runner.saved.paused, true);
+      const copy = (await fs.readdir(path.dirname(runner.file))).find(name => name.startsWith('automation-state-quarantine-'));
+      assert.deepEqual(await fs.readFile(path.join(path.dirname(runner.file), copy)), original);
+    } finally { runner.close(); }
+  }
+});
+
+test('valid older queue records retain optional-field defaults and never create a quarantine', async () => {
+  const { runner, calls } = controller('valid-minimal'); await fs.mkdir(path.dirname(runner.file), { recursive: true });
+  await fs.writeFile(runner.file, JSON.stringify({ version: 1, enabled: false, paused: true, phase: 'paused', task: 1 }));
+  try {
+    await runner.start(); assert.deepEqual(calls, []); assert.equal(runner.saved.task, 1); assert.equal(runner.saved.failures, 0);
+    assert.equal(runner.saved.pendingOutcome, null); assert.equal(runner.saved.recovery, undefined);
+    assert.deepEqual(await fs.readdir(path.dirname(runner.file)), ['automation-state.json']);
+  } finally { runner.close(); }
+});
+
+test('read I/O errors and preservation failures leave the original untouched and cannot start work', async t => {
+  const { runner, calls } = controller('preservation-failure'); await fs.mkdir(path.dirname(runner.file), { recursive: true });
+  const original = Buffer.from(', PRIVATE_PARSER_SENTINEL'); await fs.writeFile(runner.file, original);
+  const open = fs.open.bind(fs);
+  const deny = t.mock.method(fs, 'open', async (file, ...args) => {
+    if (path.basename(file).startsWith('automation-state-quarantine-')) throw Object.assign(new Error('PRIVATE_PRESERVATION_SENTINEL'), { code: 'EACCES' });
+    return open(file, ...args);
+  });
+  await assert.rejects(runner.start(), error => /could not be preserved/.test(error.message) && !error.message.includes('PRIVATE_'));
+  assert.equal(runner.loaded, false); assert.deepEqual(calls, []); assert.deepEqual(await fs.readFile(runner.file), original);
+  assert.deepEqual(await fs.readdir(path.dirname(runner.file)), ['automation-state.json']);
+  deny.mock.restore();
+  t.mock.method(fs, 'open', async file => { if (file === runner.file) throw Object.assign(new Error('Read access denied'), { code: 'EACCES' }); return open(file); });
+  await assert.rejects(runner.start(), { code: 'EACCES' });
+  assert.equal(runner.loaded, false); assert.deepEqual(calls, []); assert.deepEqual(await fs.readFile(runner.file), original);
+});
+
+test('changed originals and redirected queue files are refused without overwriting them', async t => {
+  const { runner, calls } = controller('changed-corrupt'); await fs.mkdir(path.dirname(runner.file), { recursive: true });
+  await fs.writeFile(runner.file, ', old invalid bytes');
+  const replacement = 'A concurrent writer owns these newer bytes', open = fs.open.bind(fs);
+  const intercept = t.mock.method(fs, 'open', async (file, ...args) => {
+    if (path.basename(file).startsWith('automation-state-quarantine-')) await fs.writeFile(runner.file, replacement);
+    return open(file, ...args);
+  });
+  await assert.rejects(runner.start(), /could not be preserved/);
+  assert.equal(await fs.readFile(runner.file, 'utf8'), replacement); assert.equal(runner.loaded, false); assert.deepEqual(calls, []);
+  intercept.mock.restore();
+  const linked = controller('linked-corrupt'), outside = path.join(temporary, 'private-outside.json');
+  await fs.mkdir(path.dirname(linked.runner.file), { recursive: true }); await fs.writeFile(outside, ', outside private bytes');
+  await fs.link(outside, linked.runner.file);
+  await assert.rejects(linked.runner.start(), /redirected or not ordinary/);
+  assert.equal(await fs.readFile(outside, 'utf8'), ', outside private bytes'); assert.deepEqual(linked.calls, []);
+});
+
 for (const phase of ['publishing', 'reviewing-update']) {
   test(`restart during ${phase} reloads the saved outcome and repeats source checks before publication`, async () => {
     const saved = controller(`restart-${phase}`);

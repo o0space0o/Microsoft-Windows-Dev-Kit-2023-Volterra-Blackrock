@@ -121,6 +121,8 @@ test('public ChatGPT sign-in endpoint uses native Codex browser authorization wi
 test('without the automatic queue, OS root is selected and completed sign-in starts the project brief once', async () => {
   const system = path.join(directory, 'system'); await fs.mkdir(system);
   process.env.VOLTERRA_OS_ROOT = system;
+  await fs.writeFile(path.join(process.env.VOLTERRA_STATE_DIR, 'automation-state.json'), JSON.stringify({ version: 1, enabled: false,
+    paused: false, phase: 'idle', task: 0 }));
   const fake = new FakeCodex(), app = await createInteractiveFixture({ port: 0, codex: fake });
   try {
     assert.equal(app.automation.saved.enabled, false);
@@ -227,6 +229,63 @@ test('completed browser sign-in preserves a saved queue pause and never initiali
     assert.equal(app.snapshot().automation.task, 1); assert.equal(app.snapshot().automation.failures, 2);
     assert.equal(app.snapshot().project.threadId, 'paused-thread'); assert.equal(app.snapshot().activeTurn, null);
     assert.equal(fake.calls.filter(call => call.method === 'turn/start').length, 0); assert.deepEqual(repositoryCalls, []);
+  } finally {
+    await app?.close();
+    if (previousRoot === undefined) delete process.env.VOLTERRA_OS_ROOT; else process.env.VOLTERRA_OS_ROOT = previousRoot;
+  }
+});
+
+test('corrupt queue recovery stays paused through early and completed sign-in and preserves the project thread', async () => {
+  const system = path.join(directory, 'corrupt-queue-system'); await fs.mkdir(system);
+  const canonical = await fs.realpath(system), previousRoot = process.env.VOLTERRA_OS_ROOT;
+  process.env.VOLTERRA_OS_ROOT = canonical;
+  await fs.writeFile(path.join(process.env.VOLTERRA_STATE_DIR, 'state.json'), JSON.stringify({ version: 1, authMode: 'codex',
+    projects: { [canonical]: { path: canonical, name: 'System workspace', threadId: 'retained-corrupt-thread' } }, selected: canonical, autoContinueVision: true }));
+  const invalid = Buffer.from(', PRIVATE_QUEUE_CONTENTS');
+  await fs.writeFile(path.join(process.env.VOLTERRA_STATE_DIR, 'automation-state.json'), invalid);
+  class EarlySignInCodex extends FakeCodex {
+    async start() { this.child = {}; await this.notify({ method: 'account/login/completed', params: { success: true } }); }
+  }
+  const fake = new EarlySignInCodex(); let app;
+  try {
+    app = await createInteractiveFixture({ port: 0, codex: fake });
+    assert.equal(app.snapshot().automation.enabled, false); assert.equal(app.snapshot().automation.paused, true);
+    assert.equal(app.snapshot().automation.phase, 'paused'); assert.equal(app.snapshot().project.threadId, 'retained-corrupt-thread');
+    assert.equal(app.state.authMode, 'codex'); assert.equal(app.state.autoContinueVision, true);
+    assert.equal(fake.calls.filter(call => call.method === 'turn/start' || call.method === 'thread/resume').length, 0);
+    await fake.notify({ method: 'account/login/completed', params: { success: true } });
+    assert.equal(fake.calls.filter(call => call.method === 'turn/start' || call.method === 'thread/resume').length, 0);
+    const notices = app.snapshot().journal.filter(entry => entry.type === 'notice' && typeof entry.data === 'string' && entry.data.includes('saved automation queue'));
+    assert.equal(notices.length, 1); assert.match(notices[0].data, /disabled and paused/);
+    assert.doesNotMatch(JSON.stringify(app.snapshot().journal), /PRIVATE_QUEUE_CONTENTS|quarantine-|Unexpected token/);
+    const names = (await fs.readdir(process.env.VOLTERRA_STATE_DIR)).filter(name => name.startsWith('automation-state-quarantine-'));
+    assert.equal(names.length, 1); assert.deepEqual(await fs.readFile(path.join(process.env.VOLTERRA_STATE_DIR, names[0])), invalid);
+    const page = await fetch(app.origin), cookie = page.headers.get('set-cookie').split(';')[0];
+    assert.equal((await fetch(app.origin + '/api/state', { headers: { Cookie: cookie } })).status, 200);
+  } finally {
+    await app?.close();
+    if (previousRoot === undefined) delete process.env.VOLTERRA_OS_ROOT; else process.env.VOLTERRA_OS_ROOT = previousRoot;
+  }
+});
+
+test('an authorized early sign-in waits for queue loading and continues once when the valid queue is unpaused', async () => {
+  const system = path.join(directory, 'early-valid-queue-system'); await fs.mkdir(system);
+  const canonical = await fs.realpath(system), previousRoot = process.env.VOLTERRA_OS_ROOT;
+  process.env.VOLTERRA_OS_ROOT = canonical;
+  await fs.writeFile(path.join(process.env.VOLTERRA_STATE_DIR, 'state.json'), JSON.stringify({ version: 1, authMode: 'codex',
+    projects: { [canonical]: { path: canonical, name: 'System workspace', threadId: 'retained-early-thread' } }, selected: canonical, autoContinueVision: true }));
+  await fs.writeFile(path.join(process.env.VOLTERRA_STATE_DIR, 'automation-state.json'), JSON.stringify({ version: 1, enabled: false, paused: false, phase: 'idle', task: 0 }));
+  class EarlySignInCodex extends FakeCodex {
+    async start() { this.child = {}; await this.notify({ method: 'account/login/completed', params: { success: true } }); }
+  }
+  const fake = new EarlySignInCodex(); let app;
+  try {
+    app = await createInteractiveFixture({ port: 0, codex: fake });
+    assert.equal(app.automation.loaded, true); assert.equal(app.state.autoContinueVision, false);
+    assert.equal(fake.calls.filter(call => call.method === 'turn/start').length, 1);
+    assert.equal(fake.calls.find(call => call.method === 'thread/resume').params.threadId, 'retained-early-thread');
+    await fake.notify({ method: 'account/login/completed', params: { success: true } });
+    assert.equal(fake.calls.filter(call => call.method === 'turn/start').length, 1);
   } finally {
     await app?.close();
     if (previousRoot === undefined) delete process.env.VOLTERRA_OS_ROOT; else process.env.VOLTERRA_OS_ROOT = previousRoot;

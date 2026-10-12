@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { atomic, stateDirectory } from './storage.mjs';
 import { Repository } from './repository.mjs';
 import { root } from './platform.mjs';
@@ -11,18 +12,100 @@ export const outcomeSchema = {
 };
 
 const inFlightPhases = ['starting', 'working', 'reviewing', 'reviewing-update', 'checking', 'publishing'];
+const savedPhases = new Set([...inFlightPhases, 'idle', 'paused', 'blocked', 'restart-pending', 'waiting-for-sign-in', 'watching']);
+const recoveryNotice = 'The saved automation queue was invalid. Its original bytes were preserved privately, and automatic work is disabled and paused. You can reply in this conversation.';
+const initialState = enabled => ({ version: 1, enabled, paused: false, phase: 'idle', task: 0, failures: 0, pendingOutcome: null, reviewPassed: false, lastCommit: null, lastError: null });
+
+function validSavedState(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1
+    || typeof value.enabled !== 'boolean' || typeof value.paused !== 'boolean'
+    || !Number.isSafeInteger(value.task) || value.task < 0 || !savedPhases.has(value.phase)
+    || (value.phase === 'paused' && !value.paused)) return false;
+  if (value.failures !== undefined && (!Number.isSafeInteger(value.failures) || value.failures < 0)) return false;
+  if (value.reviewPassed !== undefined && typeof value.reviewPassed !== 'boolean') return false;
+  if (value.lastError !== undefined && value.lastError !== null && typeof value.lastError !== 'string') return false;
+  if (value.pendingOutcome !== undefined && value.pendingOutcome !== null
+    && (!value.pendingOutcome || typeof value.pendingOutcome !== 'object' || Array.isArray(value.pendingOutcome)
+      || !['progress', 'complete', 'blocked'].includes(value.pendingOutcome.status) || typeof value.pendingOutcome.summary !== 'string')) return false;
+  return true;
+}
+
+async function readSavedBytes(handle) {
+  const before = await handle.stat({ bigint: true });
+  if (!before.isFile() || before.nlink !== 1n || before.size > 2n * 1024n * 1024n) throw new Error('The saved automation queue is not a bounded ordinary file.');
+  const buffer = Buffer.alloc(Number(before.size) + 1); let count = 0;
+  while (count < buffer.length) {
+    const read = await handle.read(buffer, count, buffer.length - count, count);
+    if (!read.bytesRead) break;
+    count += read.bytesRead;
+  }
+  const after = await handle.stat({ bigint: true });
+  if (BigInt(count) !== before.size || ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'].some(key => before[key] !== after[key])) throw new Error('The saved automation queue changed while being read.');
+  return { bytes: buffer.subarray(0, count), info: before };
+}
+
+async function assertSavedIdentity(file, info) {
+  await assertSavedPath(file);
+  const current = await fs.lstat(file, { bigint: true });
+  if (['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'].some(key => info[key] !== current[key])) throw new Error('The saved automation queue changed before recovery.');
+}
+
+async function assertSavedPath(file, allowMissing = false) {
+  let current = path.resolve(file);
+  while (true) {
+    let info;
+    try { info = await fs.lstat(current, { bigint: true }); }
+    catch (error) { if (!allowMissing || error.code !== 'ENOENT') throw error; }
+    if (!info) { const parent = path.dirname(current); if (parent === current) throw new Error('The saved automation queue has no ordinary parent.'); current = parent; continue; }
+    if (info.isSymbolicLink() || path.relative(current, await fs.realpath(current)) !== ''
+      || (current === path.resolve(file) ? !info.isFile() || info.nlink !== 1n : !info.isDirectory())) throw new Error('The saved automation queue path is redirected or not ordinary.');
+    const parent = path.dirname(current); if (parent === current) break; current = parent;
+  }
+}
+
+async function preserveInvalidState(file, bytes, info) {
+  // Preserve exact bytes before the normal atomic writer can replace the queue.
+  await assertSavedIdentity(file, info);
+  const quarantine = path.join(path.dirname(file), `automation-state-quarantine-${randomUUID()}.json`);
+  const copy = await fs.open(quarantine, 'wx+', 0o600);
+  try {
+    await copy.writeFile(bytes); await copy.sync();
+    const preserved = await readSavedBytes(copy);
+    if (!preserved.bytes.equals(bytes)) throw new Error('Saved queue preservation differs.');
+    await assertSavedIdentity(quarantine, preserved.info);
+    await assertSavedIdentity(file, info);
+  } finally { await copy.close(); }
+}
 
 // Persist a bounded queue, rather than asking the model to run forever without evidence.
 export class Automation {
   constructor({ config, repository, hooks, directory = stateDirectory, enabled = false }) {
     this.config = config; this.repository = repository || new Repository({ config }); this.hooks = hooks;
     this.file = path.join(directory, 'automation-state.json'); this.enabled = enabled;
-    this.saved = { version: 1, enabled, paused: false, phase: 'idle', task: 0, failures: 0, pendingOutcome: null, reviewPassed: false, lastCommit: null, lastError: null };
+    this.saved = initialState(enabled);
     this.persistence = Promise.resolve(); this.busy = false; this.loaded = false;
   }
   async load() {
-    try { this.saved = { ...this.saved, ...JSON.parse(await fs.readFile(this.file, 'utf8')) }; }
+    let handle, recovered = false;
+    try { await assertSavedPath(this.file, true); handle = await fs.open(this.file, 'r'); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (handle) {
+      try {
+        const { bytes, info } = await readSavedBytes(handle);
+        await assertSavedIdentity(this.file, info);
+        let value;
+        try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)); }
+        catch (error) { if (!(error instanceof SyntaxError) && error.code !== 'ERR_ENCODING_INVALID_ENCODED_DATA') throw error; }
+        if (validSavedState(value)) this.saved = { ...this.saved, ...value };
+        else {
+          this.saved = { ...initialState(false), paused: true, phase: 'paused', lastError: recoveryNotice,
+            recovery: { version: 1, reason: 'invalid-saved-state', originalBytesPreserved: false } };
+          try { await preserveInvalidState(this.file, bytes, info); }
+          catch { throw new Error('The saved automation queue could not be preserved. Automatic work remains stopped.'); }
+          this.saved.recovery.originalBytesPreserved = true; recovered = true;
+        }
+      } finally { await handle.close(); }
+    }
     // A turn interrupted by power loss is resumed from the saved thread and task.
     if (inFlightPhases.includes(this.saved.phase)) this.saved.phase = 'idle';
     if (this.saved.phase === 'restart-pending') {
@@ -31,6 +114,7 @@ export class Automation {
     }
     await this.persist();
     this.loaded = true;
+    if (recovered) this.hooks.notice?.(recoveryNotice);
   }
   snapshot() { return { ...this.saved, repository: this.config.repository, branch: 'main', taskTitle: this.config.tasks[this.saved.task]?.title || 'Maintenance', tasksRemaining: Math.max(0, this.config.tasks.length - this.saved.task) }; }
   persist() {
