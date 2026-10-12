@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { fixturePrivateState } from './fixture-private-state.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -6,6 +7,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'volterra-automation-'));
 process.env.VOLTERRA_STATE_DIR = path.join(temporary, 'state');
+const privacy = fixturePrivateState(temporary);
 const { Automation } = await import('../app/automation.mjs');
 const { applySourceUpdate } = await import('../scripts/Apply-SourceUpdate.mjs');
 const { allowedSource, validateSource } = await import('../app/source-policy.mjs');
@@ -17,7 +19,7 @@ function controller(name, changes = {}) {
     checkpoint: async () => { calls.push('checks'); return { changed: true, commit: 'b'.repeat(40) }; },
     push: async () => { calls.push('push'); return { commit: 'b'.repeat(40) }; }, ...changes
   };
-  const runner = new Automation({ config, repository, directory: path.join(temporary, name), enabled: true, hooks: {
+  const runner = new Automation({ config, repository, privacy, directory: path.join(temporary, name), enabled: true, hooks: {
     connected: () => true, active: () => false, work: async task => calls.push(`work:${task.id}`), review: async () => calls.push('review'), reviewRemote: async () => calls.push('remote-review')
   } });
   return { runner, calls };
@@ -102,7 +104,7 @@ test('valid older queue records retain optional-field defaults and never create 
   try {
     await runner.start(); assert.deepEqual(calls, []); assert.equal(runner.saved.task, 1); assert.equal(runner.saved.failures, 0);
     assert.equal(runner.saved.pendingOutcome, null); assert.equal(runner.saved.recovery, undefined);
-    assert.deepEqual(await fs.readdir(path.dirname(runner.file)), ['automation-state.json']);
+    assert.deepEqual((await fs.readdir(path.dirname(runner.file))).sort(), ['automation-state.json', 'browser', 'codex', 'github']);
   } finally { runner.close(); }
 });
 
@@ -116,7 +118,7 @@ test('read I/O errors and preservation failures leave the original untouched and
   });
   await assert.rejects(runner.start(), error => /could not be preserved/.test(error.message) && !error.message.includes('PRIVATE_'));
   assert.equal(runner.loaded, false); assert.deepEqual(calls, []); assert.deepEqual(await fs.readFile(runner.file), original);
-  assert.deepEqual(await fs.readdir(path.dirname(runner.file)), ['automation-state.json']);
+  assert.deepEqual((await fs.readdir(path.dirname(runner.file))).sort(), ['automation-state.json', 'browser', 'codex', 'github']);
   deny.mock.restore();
   t.mock.method(fs, 'open', async file => { if (file === runner.file) throw Object.assign(new Error('Read access denied'), { code: 'EACCES' }); return open(file); });
   await assert.rejects(runner.start(), { code: 'EACCES' });
@@ -193,7 +195,7 @@ async function updateFixture(name) {
   await fs.mkdir(path.join(target, 'app'), { recursive: true }); await fs.mkdir(path.join(source, 'app'), { recursive: true });
   await fs.writeFile(path.join(target, 'app', 'sample.mjs'), 'previous'); await fs.writeFile(path.join(source, 'app', 'sample.mjs'), 'replacement');
   const pending = { version: 1, phase: 'pending', id: 'candidate', target: await fs.realpath(target), source: await fs.realpath(source), base: 'a'.repeat(40), commit: 'b'.repeat(40), files: [{ file: 'app/sample.mjs', expected: digest('previous'), desired: digest('replacement') }] };
-  await fs.writeFile(path.join(directory, 'pending-update.json'), JSON.stringify(pending)); return { directory, target, source, pending };
+  await fs.writeFile(path.join(directory, 'pending-update.json'), JSON.stringify(pending)); return { directory, target, source, pending, privacy };
 }
 test('an unconfirmed startup update rolls back; a healthy update is confirmed and retained', async () => {
   const broken = await updateFixture('rollback');
@@ -216,6 +218,21 @@ test('a modified candidate or local file defers application without overwriting 
   await fs.writeFile(path.join(local.target, 'app/sample.mjs'), 'local edits');
   await assert.rejects(applySourceUpdate(local), /changed since staging/);
   assert.equal(await fs.readFile(path.join(local.target, 'app/sample.mjs'), 'utf8'), 'local edits');
+});
+
+test('a pending native-helper source change requires an image build before any update write', async () => {
+  const fixture = await updateFixture('native-helper-change');
+  const file = 'scripts/Probe-WindowsFacts.cs';
+  await fs.mkdir(path.join(fixture.target, 'scripts')); await fs.mkdir(path.join(fixture.source, 'scripts'));
+  await fs.writeFile(path.join(fixture.target, file), 'Original native fixture');
+  await fs.writeFile(path.join(fixture.source, file), 'Changed native fixture');
+  fixture.pending.files = [{ file, expected: digest('Original native fixture'), desired: digest('Changed native fixture') }];
+  const manifest = path.join(fixture.directory, 'pending-update.json'); await fs.writeFile(manifest, JSON.stringify(fixture.pending));
+  const before = await fs.readFile(manifest);
+  await assert.rejects(applySourceUpdate(fixture), /source-bound helper build and image verification/);
+  assert.equal(await fs.readFile(path.join(fixture.target, file), 'utf8'), 'Original native fixture');
+  assert.deepEqual(await fs.readFile(manifest), before);
+  await assert.rejects(fs.access(path.join(fixture.directory, 'updates', 'candidate', 'rollback')), { code: 'ENOENT' });
 });
 test('update traversal and external directory links cannot write outside the helper', async () => {
   const fixture = await updateFixture('escape');

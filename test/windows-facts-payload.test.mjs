@@ -19,9 +19,9 @@ async function fixture(t, candidate = false) {
   const mount = path.join(workspace, candidate ? `build/verification/media-candidate-development-013-${candidateId}/final-boot` : 'build/development-012/final-boot');
   await fs.mkdir(path.join(workspace, 'private/tools'), { recursive: true });
   await fs.mkdir(path.join(mount, 'Volterra/private/tools'), { recursive: true });
-  const source = { version: 1, checksPassed: true, commit: 'a'.repeat(40), files: { 'scripts/Probe-WindowsFacts.cs': hash(Buffer.from('Owned C# source')), 'scripts/Build-WindowsFacts.ps1': hash(Buffer.from('Owned compiler script')) } };
+  const source = { version: 1, checksPassed: true, commit: 'a'.repeat(40), files: { 'scripts/Probe-WindowsFacts.cs': hash(Buffer.from('Owned C# source')), 'scripts/Private-WindowsState.cs': hash(Buffer.from('Owned privacy source')), 'scripts/Build-WindowsFacts.ps1': hash(Buffer.from('Owned compiler script')) } };
   const binary = Buffer.from('Fixture binary, never executed');
-  const manifest = { version: 1, kind: 'volterraWindowsFactsBuild', sourceCommit: source.commit, sourceFile: 'scripts/Probe-WindowsFacts.cs', sourceSHA256: source.files['scripts/Probe-WindowsFacts.cs'], buildScript: 'scripts/Build-WindowsFacts.ps1', buildScriptSHA256: source.files['scripts/Build-WindowsFacts.ps1'], executable: { file: binaryFile, SHA256: hash(binary), bytes: binary.length, target: 'AnyCPU; ARM64 Windows CLR required' }, compiler: { path: 'C:/Fixture/compiler.exe', SHA256: 'b'.repeat(64), fileVersion: 'Fixture' }, managementAssembly: { path: 'C:/Fixture/management.dll', SHA256: 'c'.repeat(64) }, guestCompatibilityVerified: false };
+  const manifest = { version: 1, kind: 'volterraWindowsFactsBuild', sourceCommit: source.commit, sourceFile: 'scripts/Probe-WindowsFacts.cs', sourceSHA256: source.files['scripts/Probe-WindowsFacts.cs'], privateStateSourceFile: 'scripts/Private-WindowsState.cs', privateStateSourceSHA256: source.files['scripts/Private-WindowsState.cs'], buildScript: 'scripts/Build-WindowsFacts.ps1', buildScriptSHA256: source.files['scripts/Build-WindowsFacts.ps1'], executable: { file: binaryFile, SHA256: hash(binary), bytes: binary.length, target: 'AnyCPU; ARM64 Windows CLR required' }, compiler: { path: 'C:/Fixture/compiler.exe', SHA256: 'b'.repeat(64), fileVersion: 'Fixture' }, managementAssembly: { path: 'C:/Fixture/management.dll', SHA256: 'c'.repeat(64) }, guestCompatibilityVerified: false };
   await fs.writeFile(path.join(workspace, binaryFile), binary);
   await fs.writeFile(path.join(workspace, manifestFile), JSON.stringify(manifest));
   let receiptFile = 'Fixture already verified by injected source checker';
@@ -73,13 +73,21 @@ test('read-back verification rejects changed persisted bytes without rewriting t
   assert.equal(await fs.readFile(destination, 'utf8'), 'Changed committed fixture');
 });
 
-test('facts overlay refuses a different source commit, compiler script, executable or guest acceptance claim before writes', async t => {
-  for (const change of [m => { m.sourceCommit = 'd'.repeat(40); }, m => { m.buildScriptSHA256 = 'd'.repeat(64); }, m => { m.executable.SHA256 = 'd'.repeat(64); }, m => { m.executable.file = 'private/auth.json'; }, m => { m.guestCompatibilityVerified = true; }]) {
+test('facts overlay refuses invalid provenance, changed native inputs or guest acceptance before writes', async t => {
+  for (const change of [m => { m.sourceCommit = 'invalid'; }, m => { delete m.privateStateSourceSHA256; }, m => { m.privateStateSourceSHA256 = 'd'.repeat(64); }, m => { m.buildScriptSHA256 = 'd'.repeat(64); }, m => { m.executable.SHA256 = 'd'.repeat(64); }, m => { m.executable.file = 'private/auth.json'; }, m => { m.guestCompatibilityVerified = true; }]) {
     const f = await fixture(t); change(f.manifest);
     await fs.writeFile(path.join(f.workspace, manifestFile), JSON.stringify(f.manifest));
     await assert.rejects(stageWindowsFacts(options(f)));
     assert.deepEqual(await fs.readdir(path.join(f.mount, 'Volterra/private/tools')), []);
   }
+});
+
+test('source-only updates reuse unchanged native inputs while retaining their compiled commit', async t => {
+  const f = await fixture(t); f.manifest.sourceCommit = 'd'.repeat(40);
+  await fs.writeFile(path.join(f.workspace, manifestFile), JSON.stringify(f.manifest));
+  const result = await stageWindowsFacts(options(f));
+  assert.equal(result.sourceCommit, f.source.commit); assert.equal(result.compiledSourceCommit, 'd'.repeat(40));
+  assert.equal(result.privateStateSourceSHA256, f.source.files['scripts/Private-WindowsState.cs']);
 });
 
 test('facts overlay refuses redirected private destination and hardlink writes', async t => {

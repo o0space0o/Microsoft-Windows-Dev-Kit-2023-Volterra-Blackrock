@@ -37,6 +37,7 @@ internal static class ProbeWindowsFacts
 
     private static int Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--private-state") return PrivateWindowsState.Run(args);
         uint pid = 0;
         if (args.Length != 0 && (args.Length != 2 || args[0] != "--browser-pid" || !UInt32.TryParse(args[1], NumberStyles.None, CultureInfo.InvariantCulture, out pid) || pid == 0 || pid > Int32.MaxValue))
         {

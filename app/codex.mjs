@@ -2,11 +2,13 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
 import { executable, redact } from './platform.mjs';
+import { ensurePrivateState, managedAccountDirectory } from './private-state.mjs';
 
 export class CodexBridge extends EventEmitter {
   constructor() { super(); this.pending = new Map(); this.counter = 0; this.approvals = new Map(); }
   async start(token) {
     if (this.child) return;
+    await ensurePrivateState({ directory: managedAccountDirectory('codex'), scope: 'codex', create: true });
     const args = ['app-server', '--listen', 'stdio://', '-c', 'approval_policy="on-request"', '-c', 'sandbox_mode="workspace-write"'];
     if (token) args.push('-c', 'model_provider="openai_chatgpt_plan"', '-c', 'model_providers.openai_chatgpt_plan.name="ChatGPT plan"', '-c', 'model_providers.openai_chatgpt_plan.base_url="https://api.openai.com/v1"', '-c', 'model_providers.openai_chatgpt_plan.env_key="ACCESS_TOKEN"', '-c', 'model_providers.openai_chatgpt_plan.wire_api="responses"', '-c', 'model_providers.openai_chatgpt_plan.requires_openai_auth=false', '-c', 'model_providers.openai_chatgpt_plan.supports_websockets=false');
     const env = { ...process.env };

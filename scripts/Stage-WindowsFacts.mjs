@@ -7,6 +7,7 @@ import { hash } from '../app/source-policy.mjs';
 import { validateOfflineImageMount } from '../app/image-mount.mjs';
 
 const sourceFile = 'scripts/Probe-WindowsFacts.cs';
+const privateStateSourceFile = 'scripts/Private-WindowsState.cs';
 const buildScript = 'scripts/Build-WindowsFacts.ps1';
 const binaryFile = 'private/tools/volterra-facts.exe';
 const manifestFile = 'private/tools/volterra-facts-build.json';
@@ -48,8 +49,10 @@ async function readOwned(base, target, limit) {
 }
 
 export function validateFactsManifest(manifest, source, binary) {
-  if (manifest?.version !== 1 || manifest.kind !== 'volterraWindowsFactsBuild' || manifest.sourceCommit !== source.commit || manifest.sourceFile !== sourceFile || manifest.buildScript !== buildScript || manifest.guestCompatibilityVerified !== false) throw new Error('The private facts provenance is not bound to this checked source.');
-  for (const [file, expected] of [[sourceFile, manifest.sourceSHA256], [buildScript, manifest.buildScriptSHA256]]) {
+  if (manifest?.version !== 1 || manifest.kind !== 'volterraWindowsFactsBuild' || !/^[a-f\d]{40}$/.test(manifest.sourceCommit || '') || manifest.sourceFile !== sourceFile || manifest.privateStateSourceFile !== privateStateSourceFile || manifest.buildScript !== buildScript || manifest.guestCompatibilityVerified !== false) throw new Error('The private facts provenance is not bound to this checked source.');
+  // Retain the actual compiled commit. Reuse across source-only updates is
+  // permitted solely when every original native/build input stays byte-identical.
+  for (const [file, expected] of [[sourceFile, manifest.sourceSHA256], [privateStateSourceFile, manifest.privateStateSourceSHA256], [buildScript, manifest.buildScriptSHA256]]) {
     if (!/^[a-f\d]{64}$/i.test(expected || '') || source.files[file]?.toLowerCase() !== expected.toLowerCase()) throw new Error('Facts source or compiler-script hashes differ from the immutable source snapshot.');
   }
   if (manifest.executable?.file !== binaryFile || manifest.executable.SHA256?.toLowerCase() !== hash(binary) || manifest.executable.bytes !== binary.length || manifest.executable.target !== 'AnyCPU; ARM64 Windows CLR required') throw new Error('The facts executable differs from its source-bound provenance.');
@@ -83,7 +86,7 @@ export async function stageWindowsFacts({ receiptFile, workspace, mount, mode = 
     if (hash(await readOwned(mounted, destination, file === binaryFile ? 4_000_000 : 64_000)) !== files[file]) throw new Error('The persisted facts payload differs from its verified private input.');
   }
   if (hash(await readOwned(root, binaryPath, 4_000_000)) !== files[binaryFile] || hash(await readOwned(root, manifestPath, 64_000)) !== files[manifestFile]) throw new Error('The private facts inputs changed during offline image access.');
-  return { version: 1, mode, sourceCommit: source.commit, sourceFile, sourceSHA256: manifest.sourceSHA256, buildScript, buildScriptSHA256: manifest.buildScriptSHA256, executableSHA256: files[binaryFile], provenanceSHA256: files[manifestFile], bytes: binary.length, files, payloadBytesVerified: true, guestCompatibilityVerified: false, runtimeAccepted: false, physicalHardwareAccepted: false };
+  return { version: 1, mode, sourceCommit: source.commit, compiledSourceCommit: manifest.sourceCommit, sourceFile, sourceSHA256: manifest.sourceSHA256, privateStateSourceFile, privateStateSourceSHA256: manifest.privateStateSourceSHA256, buildScript, buildScriptSHA256: manifest.buildScriptSHA256, executableSHA256: files[binaryFile], provenanceSHA256: files[manifestFile], bytes: binary.length, files, payloadBytesVerified: true, guestCompatibilityVerified: false, runtimeAccepted: false, physicalHardwareAccepted: false };
 }
 
 if (process.argv[1] && samePath(process.argv[1], fileURLToPath(import.meta.url))) {

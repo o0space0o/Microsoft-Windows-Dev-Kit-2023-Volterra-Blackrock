@@ -23,8 +23,15 @@ async function checkedPath(base, file) {
   }
   return target;
 }
-export async function applySourceUpdate({ directory, target, mode = 'apply', git }) {
+export async function applySourceUpdate({ directory, target, mode = 'apply', git, privacy }) {
   directory = await fs.realpath(directory); target = await fs.realpath(target);
+  // The independent bootstrap keeps this original checker alongside itself,
+  // so a damaged application cannot bypass State privacy during rollback.
+  if (!privacy) {
+    const bootstrap = path.basename(path.dirname(fileURLToPath(import.meta.url))) === 'bootstrap';
+    privacy = (await import(bootstrap ? './private-state.mjs' : '../app/private-state.mjs')).ensurePrivateState;
+  }
+  await privacy({ directory, volume: process.env.VOLTERRA_STATE_VOLUME || '', scope: 'state', root: target });
   const manifest = path.join(directory, 'pending-update.json');
   const raw = await content(manifest); if (!raw) return { status: 'none' };
   const pending = JSON.parse(raw.toString('utf8'));
@@ -67,6 +74,7 @@ export async function applySourceUpdate({ directory, target, mode = 'apply', git
   }
   if (pending.phase === 'applied' || pending.phase === 'applying') return restore();
   if (pending.phase !== 'pending') return { status: pending.phase };
+  if (pending.files.some(item => ['scripts/Probe-WindowsFacts.cs', 'scripts/Private-WindowsState.cs', 'scripts/Build-WindowsFacts.ps1'].includes(item.file))) throw new Error('This update changes the original native helper. A source-bound helper build and image verification are required before applying it.');
   for (const item of pending.files) {
     const original = await content(await checkedPath(target, item.file)), replacement = await content(await checkedPath(source, item.file));
     if ((original === null ? null : digest(original)) !== item.expected || (replacement === null ? null : digest(replacement)) !== item.desired) throw new Error('Source changed since staging; update deferred.');

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { atomic, stateDirectory } from './storage.mjs';
 import { Repository } from './repository.mjs';
 import { root } from './platform.mjs';
+import { ensurePrivateState } from './private-state.mjs';
 
 export const outcomeSchema = {
   type: 'object', additionalProperties: false,
@@ -79,13 +80,14 @@ async function preserveInvalidState(file, bytes, info) {
 
 // Persist a bounded queue, rather than asking the model to run forever without evidence.
 export class Automation {
-  constructor({ config, repository, hooks, directory = stateDirectory, enabled = false }) {
-    this.config = config; this.repository = repository || new Repository({ config }); this.hooks = hooks;
+  constructor({ config, repository, hooks, directory = stateDirectory, enabled = false, privacy = ensurePrivateState }) {
+    this.config = config; this.repository = repository || new Repository({ config, privacy }); this.hooks = hooks; this.directory = directory; this.privacy = privacy;
     this.file = path.join(directory, 'automation-state.json'); this.enabled = enabled;
     this.saved = initialState(enabled);
     this.persistence = Promise.resolve(); this.busy = false; this.loaded = false;
   }
   async load() {
+    await this.privacy({ directory: this.directory, scope: 'state', create: true, root });
     let handle, recovered = false;
     try { await assertSavedPath(this.file, true); handle = await fs.open(this.file, 'r'); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -100,7 +102,7 @@ export class Automation {
         else {
           this.saved = { ...initialState(false), paused: true, phase: 'paused', lastError: recoveryNotice,
             recovery: { version: 1, reason: 'invalid-saved-state', originalBytesPreserved: false } };
-          try { await preserveInvalidState(this.file, bytes, info); }
+          try { await this.privacy({ directory: this.directory, scope: 'state', root }); await preserveInvalidState(this.file, bytes, info); }
           catch { throw new Error('The saved automation queue could not be preserved. Automatic work remains stopped.'); }
           this.saved.recovery.originalBytesPreserved = true; recovered = true;
         }
@@ -119,7 +121,7 @@ export class Automation {
   snapshot() { return { ...this.saved, repository: this.config.repository, branch: 'main', taskTitle: this.config.tasks[this.saved.task]?.title || 'Maintenance', tasksRemaining: Math.max(0, this.config.tasks.length - this.saved.task) }; }
   persist() {
     const content = JSON.stringify(this.saved, null, 2);
-    this.persistence = this.persistence.catch(() => {}).then(() => atomic(this.file, content));
+    this.persistence = this.persistence.catch(() => {}).then(() => atomic(this.file, content, 0o600, { directory: this.directory, privacy: this.privacy }));
     this.hooks.changed?.(); return this.persistence;
   }
   async pause() { this.saved.paused = true; this.saved.phase = 'paused'; await this.persist(); }

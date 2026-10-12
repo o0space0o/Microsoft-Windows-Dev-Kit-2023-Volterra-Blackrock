@@ -14,7 +14,7 @@ export const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 export function allowedSource(file) {
   if (typeof file !== 'string' || file.includes('\\') || file.includes(':') || file.startsWith('/') || file.split('/').some(p => !p || p === '.' || p === '..')) return false;
   if (roots.has(file)) return true;
-  if (file === 'scripts/Probe-WindowsFacts.cs') return true;
+  if (file === 'scripts/Probe-WindowsFacts.cs' || file === 'scripts/Private-WindowsState.cs') return true;
   if (/^design\/[\w/-]+\.png$/.test(file)) return true;
   return /^(app|scripts|test|image|design)\/[\w./-]+\.(mjs|js|json|ps1|cmd|html|css|md|txt)$/.test(file)
     && !/(^|\/)(?:node_modules|private|build|\.git|\.env[^/]*|auth\.json|credentials?(?:\.json)?)(\/|$)/i.test(file);

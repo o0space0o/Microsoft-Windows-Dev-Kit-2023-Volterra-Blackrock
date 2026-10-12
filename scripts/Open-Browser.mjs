@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ensurePrivateState } from '../app/private-state.mjs';
 
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -20,11 +21,12 @@ export function githubBrowserCommand(node, script) {
   return [node, script].map(quote).join(' ');
 }
 
-export async function openSystemBrowser(value, { root = sourceRoot, profile = process.env.VOLTERRA_BROWSER_PROFILE, spawnImpl = spawn, existsImpl = existsSync } = {}) {
+export async function openSystemBrowser(value, { root = sourceRoot, profile = process.env.VOLTERRA_BROWSER_PROFILE, spawnImpl = spawn, existsImpl = existsSync, privacy = ensurePrivateState } = {}) {
   const address = browserAddress(value);
   const chrome = path.join(root, 'private', 'tools', 'chrome', 'chrome.exe');
   if (!existsImpl(chrome)) throw new Error('The staged system browser is unavailable. Official browser sign-in cannot start.');
-  if (profile && (!path.isAbsolute(profile) || /[\u0000-\u001f\u007f]/.test(profile))) throw new Error('The browser profile must be an absolute local directory.');
+  if (!profile || !path.isAbsolute(profile) || /[\u0000-\u001f\u007f]/.test(profile)) throw new Error('The browser profile must be an absolute local directory.');
+  await privacy({ directory: profile, scope: 'browser', create: true, root });
   const args = ['--new-window', '--no-first-run'];
   if (profile) args.push(`--user-data-dir=${profile}`);
   args.push(address);

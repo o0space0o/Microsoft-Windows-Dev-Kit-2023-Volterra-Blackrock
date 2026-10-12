@@ -4,9 +4,11 @@ import { run, executable, root } from './platform.mjs';
 import { allowedSource, validateSource } from './source-policy.mjs';
 import { atomic, stateDirectory } from './storage.mjs';
 import { randomUUID } from 'node:crypto';
+import { ensurePrivateState, managedAccountDirectory } from './private-state.mjs';
 
 export class Repository {
-  constructor({ directory = root, config, execute = run } = {}) { this.directory = directory; this.config = config; this.execute = execute; }
+  constructor({ directory = root, config, execute = run, privacy = ensurePrivateState } = {}) { this.directory = directory; this.config = config; this.execute = execute; this.privacy = privacy; }
+  privateState(create = false) { return this.privacy({ directory: stateDirectory, scope: 'state', create, root }); }
   git(...args) { return this.execute(executable('git'), ['-C', this.directory, ...args], { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }); }
   async initialize() {
     const url = `https://github.com/${this.config.repository}.git`;
@@ -42,6 +44,7 @@ export class Repository {
     return output;
   }
   async checkpoint(summary, allow = () => true) {
+    await this.privateState(true);
     const files = (await this.git('ls-files', '-z', '--cached', '--others', '--exclude-standard')).split('\0').filter(Boolean);
     if (files.some(f => !allowedSource(f))) throw new Error('The Git index contains files outside the public source policy.');
     await validateSource(this.directory, files);
@@ -62,6 +65,7 @@ export class Repository {
     return { changed: true, commit };
   }
   async push(allow = () => true) {
+    await this.privateState(); await this.privacy({ directory: managedAccountDirectory('github'), scope: 'github', create: true, root });
     // Git rejects a non-fast-forward push; conflicting main commits are never overwritten.
     await this.execute(executable('gh'), ['auth', 'setup-git', '--hostname', 'github.com']);
     if (!allow()) throw new Error('Automation paused before publication.');
@@ -69,18 +73,20 @@ export class Repository {
     return { commit: await this.git('rev-parse', 'HEAD'), branch: 'main' };
   }
   async stage({ current, latest }) {
+    await this.privateState(true);
     if (await this.git('status', '--porcelain')) throw new Error('Local source changes must be checkpointed before staging an update.');
     if (await fs.stat(path.join(stateDirectory, 'pending-update.json')).then(() => true, () => false)) throw new Error('An update is already waiting for restart.');
     const files = (await this.git('diff', '--name-only', '-z', current, latest)).split('\0').filter(Boolean);
     if (!files.length) return null;
     if (files.some(f => !allowedSource(f))) throw new Error('Remote changes include protected files.');
+    if (files.some(f => ['scripts/Probe-WindowsFacts.cs', 'scripts/Private-WindowsState.cs', 'scripts/Build-WindowsFacts.ps1'].includes(f))) throw new Error('This update changes the original native helper. A source-bound helper build and image verification are required before applying it.');
     const id = `${Date.now()}-${latest.slice(0, 12)}`, worktree = path.join(stateDirectory, 'updates', id, 'source');
     await fs.mkdir(path.dirname(worktree), { recursive: true });
     await this.git('worktree', 'add', '--detach', worktree, latest);
     const desired = await validateSource(worktree, files), expected = await validateSource(this.directory, files);
     await this.check(worktree);
     const pending = { version: 1, phase: 'pending', id, source: worktree, target: await fs.realpath(this.directory), base: current, commit: latest, files: files.map(file => ({ file, expected: expected[file], desired: desired[file] })), stagedAt: new Date().toISOString() };
-    await atomic(path.join(stateDirectory, 'pending-update.json'), JSON.stringify(pending, null, 2));
+    await atomic(path.join(stateDirectory, 'pending-update.json'), JSON.stringify(pending, null, 2), 0o600, { privacy: this.privacy });
     return pending;
   }
 }

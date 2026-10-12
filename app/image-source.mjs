@@ -97,7 +97,7 @@ export async function verifyImageSource(receiptFile, workspace, { git = process.
 export async function copyImagePayload(receiptFile, workspace, mount, options = {}) {
   const source = await verifyImageSource(receiptFile, workspace, options);
   const { mounted } = await validateOfflineImageMount({ workspace, mount, receiptFile, source });
-  for (const name of ['scripts/Apply-SourceUpdate.mjs', 'image/Volterra-Startup.cmd', 'PROJECT_BRIEF.md']) if (!source.files[name]) throw new Error('Required boot source is missing from the checked commit.');
+  for (const name of ['scripts/Apply-SourceUpdate.mjs', 'app/private-state.mjs', 'image/Volterra-Startup.cmd', 'PROJECT_BRIEF.md']) if (!source.files[name]) throw new Error('Required boot source is missing from the checked commit.');
   const samePath = (target, real) => path.relative(path.resolve(target), path.resolve(real)) === '';
   async function directory(base, target) {
     if (target !== base && !inside(base, target)) throw new Error('An image directory escaped the offline mount.');
@@ -169,6 +169,7 @@ export async function copyImagePayload(receiptFile, workspace, mount, options = 
   for (const [name, expected] of Object.entries(source.files)) await write(payload, path.join(payload, name), await fs.readFile(path.join(source.source, name)), expected);
   for (const [name, destination] of [
     ['scripts/Apply-SourceUpdate.mjs', 'Volterra/private/bootstrap/Apply-SourceUpdate.mjs'],
+    ['app/private-state.mjs', 'Volterra/private/bootstrap/private-state.mjs'],
     ['image/Volterra-Startup.cmd', 'Windows/Volterra-Startup.cmd'],
     ['PROJECT_BRIEF.md', 'PROJECT_BRIEF.md']
   ]) await write(mounted, path.join(mounted, destination), await fs.readFile(path.join(payload, name)), source.files[name]);

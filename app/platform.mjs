@@ -26,7 +26,7 @@ export function executable(name) {
   return existsSync(portable) ? portable : name;
 }
 export async function openBrowser(value) {
-  if (process.platform === 'win32') return openSystemBrowser(value, { root, profile: path.join(stateDirectory, 'browser') });
+  if (process.platform === 'win32') return openSystemBrowser(value, { root, profile: process.env.VOLTERRA_BROWSER_PROFILE || path.join(stateDirectory, 'browser') });
   const url = new URL(value);
   if (url.username || url.password || (url.protocol !== 'https:' && !(url.protocol === 'http:' && url.hostname === '127.0.0.1'))) throw new Error('Unsupported browser address');
   return run(process.platform === 'darwin' ? 'open' : 'xdg-open', [url.href]);

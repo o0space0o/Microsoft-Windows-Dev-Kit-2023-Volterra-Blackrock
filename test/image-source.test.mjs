@@ -30,6 +30,7 @@ async function fixture(t) {
   await fs.writeFile(path.join(directory, 'test/fixture.test.mjs'), "import assert from 'node:assert/strict'; import {value} from '../app/fixture.mjs'; assert.equal(value, 'committed');\n");
   await fs.mkdir(path.join(directory, 'scripts')); await fs.mkdir(path.join(directory, 'image'));
   await fs.writeFile(path.join(directory, 'scripts/Apply-SourceUpdate.mjs'), "export const fixture = true;\n");
+  await fs.writeFile(path.join(directory, 'app/private-state.mjs'), "export const privacyFixture = true;\n");
   await fs.writeFile(path.join(directory, 'image/Volterra-Startup.cmd'), '@echo off\r\necho Fixture\r\n');
   await fs.writeFile(path.join(directory, 'PROJECT_BRIEF.md'), 'Private fixture boot source.\n');
   await fs.writeFile(path.join(directory, '.gitignore'), '/build/\n/private/\n');
@@ -112,6 +113,7 @@ test('offline source copying removes obsolete source, preserves private/vendor f
   assert.equal(await fs.readFile(path.join(mount, 'Volterra/private/vendor.exe'), 'utf8'), 'Private runtime fixture');
   assert.equal(await fs.readFile(path.join(mount, 'Windows/vendor.dll'), 'utf8'), 'Vendor fixture');
   assert.deepEqual(await fs.readFile(path.join(mount, 'Volterra/private/bootstrap/Apply-SourceUpdate.mjs')), await fs.readFile(path.join(receipt.source, 'scripts/Apply-SourceUpdate.mjs')));
+  assert.deepEqual(await fs.readFile(path.join(mount, 'Volterra/private/bootstrap/private-state.mjs')), await fs.readFile(path.join(receipt.source, 'app/private-state.mjs')));
   assert.deepEqual(await fs.readFile(path.join(mount, 'Windows/Volterra-Startup.cmd')), await fs.readFile(path.join(receipt.source, 'image/Volterra-Startup.cmd')));
   await assert.rejects(fs.access(path.join(mount, 'Windows/VolterraStartup.cmd')));
   assert.equal(JSON.parse(await fs.readFile(path.join(mount, 'Volterra/private/source-version.json'), 'utf8')).commit, receipt.commit);

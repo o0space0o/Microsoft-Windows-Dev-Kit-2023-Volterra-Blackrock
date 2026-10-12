@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { fixturePrivateState } from './fixture-private-state.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -7,7 +8,11 @@ import net from 'node:net';
 import { EventEmitter } from 'node:events';
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'volterra-delayed-start-'));
 process.env.VOLTERRA_STATE_DIR = path.join(directory, 'state');
-const { createApplication } = await import('../app/server.mjs');
+process.env.CODEX_HOME = path.join(directory, 'state', 'codex');
+process.env.GH_CONFIG_DIR = path.join(directory, 'state', 'github');
+const statePrivacy = fixturePrivateState(directory);
+const { createApplication: createApplicationChecked } = await import('../app/server.mjs');
+const createApplication = options => createApplicationChecked({ statePrivacy, githubAccountReader: async () => { throw new Error('Fixture has no GitHub account.'); }, ...options });
 
 test('HTTP readiness remains false until the actual Codex initialization finishes', async () => {
   let release, started;

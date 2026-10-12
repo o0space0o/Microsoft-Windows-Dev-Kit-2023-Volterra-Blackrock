@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { CodexBridge } from './codex.mjs';
 import { ChatGPTSignIn } from './auth.mjs';
 import { root, executable, run, powershell, openBrowser, chooseFolder, redact } from './platform.mjs';
-import { readState, saveState, projectPath, readCredential, stateDirectory } from './storage.mjs';
+import { readState as readStoredState, saveState as saveStoredState, projectPath, readCredential as readStoredCredential, stateDirectory } from './storage.mjs';
+import { ensurePrivateState, managedAccountDirectory } from './private-state.mjs';
 import { Automation, outcomeSchema, readAutomationConfig } from './automation.mjs';
 import { serviceQuery, collectServices, inspectServices, serviceReport } from './service-tools.mjs';
 import { deviceQuery, collectDevices, inspectDevices, deviceReport } from './device-tools.mjs';
@@ -28,7 +29,14 @@ import { artworkQuery, collectArtwork, inspectArtwork, artworkReport } from './a
 import { tcpQuery, collectTcp, inspectTcp, tcpReport } from './tcp-tools.mjs';
 import { githubBrowserCommand } from '../scripts/Open-Browser.mjs';
 
-export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices, storageCollector = collectStorage, networkCollector = collectNetworking, browserOpener = openBrowser, fileCollector = collectFiles, logCollector = collectLogs, maintenanceCollector = collectMaintenance, processCollector = collectProcesses, dnsCollector = collectDns, memoryCollector = collectMemory, uptimeCollector = collectUptime, driveCollector = collectDrives, processorCollector = collectProcessors, resolutionCollector = collectResolution, dependencyCollector = collectDependencies, artworkCollector = collectArtwork, tcpCollector = collectTcp } = {}) {
+export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, statePrivacy = ensurePrivateState, githubAccountReader = () => run(executable('gh'), ['api', 'user', '--jq', '.login']), githubSpawner = spawn, serviceCollector = collectServices, deviceCollector = collectDevices, storageCollector = collectStorage, networkCollector = collectNetworking, browserOpener = openBrowser, fileCollector = collectFiles, logCollector = collectLogs, maintenanceCollector = collectMaintenance, processCollector = collectProcesses, dnsCollector = collectDns, memoryCollector = collectMemory, uptimeCollector = collectUptime, driveCollector = collectDrives, processorCollector = collectProcessors, resolutionCollector = collectResolution, dependencyCollector = collectDependencies, artworkCollector = collectArtwork, tcpCollector = collectTcp } = {}) {
+  const storageOptions = { privacy: statePrivacy };
+  const checkState = (create = false) => statePrivacy({ directory: stateDirectory, volume: process.env.VOLTERRA_STATE_VOLUME || '', scope: 'state', create, root });
+  const checkAccount = scope => statePrivacy({ directory: scope === 'browser' ? process.env.VOLTERRA_BROWSER_PROFILE || path.join(stateDirectory, 'browser') : managedAccountDirectory(scope), scope, create: true, root });
+  const readState = () => readStoredState(storageOptions), saveState = value => saveStoredState(value, storageOptions), readCredential = () => readStoredCredential(storageOptions);
+  // Refuse before reading or replacing any saved state. Existing accounts and
+  // profiles retain their chosen locations and are verified before native use.
+  await checkState(true);
   const state = await readState();
   const defaultFolder = await fs.realpath(process.env.VOLTERRA_OS_ROOT || root);
   if (!state.selected || (process.env.VOLTERRA_OS_ROOT && state.selected !== defaultFolder)) {
@@ -74,7 +82,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     if (type !== 'state') {
       lastActivityAt = entry.time;
       journal.push(entry); if (journal.length > 1000) journal.shift();
-      journalWrites = journalWrites.catch(() => {}).then(() => fs.appendFile(journalFile, JSON.stringify(entry) + '\n'));
+      journalWrites = journalWrites.catch(() => {}).then(async () => { await checkState(); await fs.appendFile(journalFile, JSON.stringify(entry) + '\n'); });
     }
     const serialized = `data: ${JSON.stringify(entry)}\n\n`;
     for (const client of clients) client.write(serialized);
@@ -92,7 +100,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     const credential = await readCredential(); account = { type: 'chatgpt', email: credential.email, source: 'This app’s ChatGPT plan authorization' };
     event('notice', 'ChatGPT plan connected. Project history stays on this device.'); publish();
     await continueInitialVision();
-  }, error => event('error', error));
+  }, error => event('error', error), storageOptions);
   codex.on('diagnostic', message => event('notice', message));
   codex.on('stopped', () => { runtimeReady = false; loadedThread = null; activeTurn = null; approvals.clear(); event('notice', 'Codex stopped. Saved project history is retained.'); publish(); });
   codex.on('approval', request => {
@@ -128,6 +136,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     } catch (error) { event('error', error.message); }
   });
   async function readManagedAccount() {
+    await checkState(); await checkAccount('codex');
     const response = await codex.request('account/read', { refreshToken: false });
     account = response.account?.type === 'chatgpt' ? { type: 'chatgpt', email: response.account.email, planType: response.account.planType, source: 'Codex-managed ChatGPT sign-in' } : null;
     return account;
@@ -149,6 +158,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     finally { initialContinuation = null; }
   }
   async function ensureRuntime(mode = state.authMode) {
+    await checkState(); await checkAccount('codex');
     if (runtimeStart) await runtimeStart;
     const token = mode === 'siwc' ? await auth.accessToken() : null;
     if (codex.child && token !== runtimeToken) {
@@ -193,6 +203,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     'codex/connect': async () => { if (activeTurn) throw new Error('Interrupt the active job before changing accounts.'); await ensureRuntime('codex'); state.authMode = 'codex'; await saveState(state); publish(); return { connected: !!account }; },
     'codex/sign-in': async body => {
       if (activeTurn) throw new Error('Interrupt the active job before signing in again.');
+      await checkAccount('browser');
       await ensureRuntime('codex'); state.authMode = 'codex'; await saveState(state);
       const result = await codex.request('account/login/start', { type: body.device ? 'chatgptDeviceCode' : 'chatgpt' });
       await browserOpener(result.authUrl || result.verificationUrl);
@@ -285,11 +296,12 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
       await fs.writeFile(target, body.content, { flag: 'w' }); event('notice', `Saved ${body.path}`); return { saved: true };
     },
     'github/sign-in': async () => {
+      await checkState(); await checkAccount('github'); await checkAccount('browser');
       if (github?.pending) throw new Error('GitHub browser sign-in is already pending.');
       const env = { ...process.env };
-      env.VOLTERRA_BROWSER_PROFILE = path.join(stateDirectory, 'browser');
+      env.VOLTERRA_BROWSER_PROFILE ||= path.join(stateDirectory, 'browser');
       if (process.platform === 'win32') env.GH_BROWSER = githubBrowserCommand(process.execPath, path.join(root, 'scripts', 'Open-Browser.mjs'));
-      const child = spawn(executable('gh'), ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web'], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      const child = githubSpawner(executable('gh'), ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web'], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
       github = { pending: true }; publish();
       child.stdin.end();
       let signInOutput = '';
@@ -301,7 +313,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
       });
       child.once('error', error => { github = null; event('error', error.message); publish(); });
       child.once('exit', async code => {
-        try { github = code === 0 ? { login: await run(executable('gh'), ['api', 'user', '--jq', '.login']) } : null; if (code !== 0) event('error', 'GitHub sign-in did not complete.'); }
+        try { if (code === 0) { await checkState(); await checkAccount('github'); } github = code === 0 ? { login: await githubAccountReader() } : null; if (code !== 0) event('error', 'GitHub sign-in did not complete.'); }
         catch (error) { event('error', error.message); github = null; }
         publish();
         if (github?.login && automation?.saved.enabled) await automation.tick();
@@ -309,6 +321,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
       return { status: 'Follow the GitHub browser sign-in instructions in the journal' };
     },
     'github/inspect': async body => {
+      await checkState(); await checkAccount('github');
       if (!/^[\w.-]+\/[\w.-]+$/.test(body.repository || '')) throw new Error('Enter a GitHub repository as owner/name.');
       const repo = body.repository;
       const details = JSON.parse(await run(executable('gh'), ['api', `repos/${repo}`]));
@@ -319,7 +332,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     },
     'automation/resume': async () => { await automation.resume(); return { automation: automation.snapshot() }; },
     'automation/pause': async () => actions['agent/interrupt']({ pause: true }),
-    'usage/open': async () => { await openBrowser('https://chatgpt.com/settings/usage'); return {}; },
+    'usage/open': async () => { await checkState(); await checkAccount('browser'); await browserOpener('https://chatgpt.com/settings/usage'); return {}; },
     'restart/check': async () => { await checkRestart(); return { required: restartRequired }; }
   };
   const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.png': 'image/png' };
@@ -347,6 +360,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
         if (request.method !== 'POST' || request.headers['x-volterra-client'] !== session || !request.headers['content-type']?.startsWith('application/json')) { response.writeHead(403).end(); return; }
         let body = ''; for await (const chunk of request) { body += chunk; if (body.length > 1_200_000) throw new Error('Request too large.'); }
         const action = actions[url.pathname.slice(5)]; if (!action) { response.writeHead(404).end(); return; }
+        await checkState();
         const result = await action(body ? JSON.parse(body) : {});
         response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(result || {})); return;
       }
@@ -372,7 +386,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     });
     activeTurn = result.turn.id; paused = false; publish();
   }
-  automation = new Automation({ config, repository, enabled: autostart, hooks: {
+  automation = new Automation({ config, repository, privacy: statePrivacy, enabled: autostart, hooks: {
     connected: () => !!account, active: () => !!activeTurn,
     changed: publish, notice: message => event('notice', message),
     work: async (task, saved) => {
@@ -389,7 +403,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     try { await ensureRuntime('codex'); if (account && !state.authMode) { state.authMode = 'codex'; await saveState(state); } }
     catch (error) { event('error', error.message); }
   }
-  try { github = { login: await run(executable('gh'), ['api', 'user', '--jq', '.login']) }; } catch { github = null; }
+  try { await checkAccount('github'); github = { login: await githubAccountReader() }; } catch { github = null; }
   connectionsChecked = true;
   await automation.start(); publish();
   if (initialContinuationPending) await continueInitialVision();

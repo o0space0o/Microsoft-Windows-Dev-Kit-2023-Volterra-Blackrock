@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { atomic } from './storage.mjs';
+import { ensurePrivateState } from './private-state.mjs';
 import { redact } from './platform.mjs';
 
 // Keep completed observations when a later stage fails. Initialization is not
@@ -92,13 +93,15 @@ export async function waitForHelperRuntime(origin, { timeoutMs = 120000, interva
   return { ...report, error };
 }
 
-export async function probePersistentHistory({ directory, codexHome, sourceRoot, osRoot, bootId, project }) {
+export async function probePersistentHistory({ directory, codexHome, sourceRoot, osRoot, bootId, project, privacy = ensurePrivateState }) {
   const report = { storageConfigured: false, historyReadable: false, survivedBoot: false };
   if (!directory || !codexHome || !sourceRoot || !osRoot) return report;
   try {
     const [stateRoot, home, source] = await Promise.all([fs.realpath(directory), fs.realpath(codexHome), fs.realpath(sourceRoot)]);
     const systemVolume = path.parse(osRoot).root.toLowerCase(), stateVolume = path.parse(stateRoot).root.toLowerCase();
     if (inside(source, stateRoot) || inside(source, home) || !inside(stateRoot, home) || home === stateRoot || path.parse(home).root.toLowerCase() !== stateVolume || home !== await fs.realpath(path.join(stateRoot, 'codex')) || (systemVolume === 'x:\\' ? stateVolume === systemVolume : stateVolume !== systemVolume)) return report;
+    await privacy({ directory, volume: process.env.VOLTERRA_STATE_VOLUME || '', scope: 'state', root: sourceRoot });
+    await privacy({ directory: codexHome, scope: 'codex', root: sourceRoot });
     report.storageConfigured = true;
     if (!project?.threadId) return report;
     const saved = JSON.parse(await fs.readFile(path.join(stateRoot, 'state.json'), 'utf8'));
@@ -123,7 +126,7 @@ export async function probePersistentHistory({ directory, codexHome, sourceRoot,
     // Repeated probes in one boot never count as reboot persistence. Retain a
     // matching witness so that a later user-controlled boot can establish it.
     if (!previous || previous.sourceRoot !== source || previous.codexHome !== home || previous.project !== project.path || previous.threadId !== project.threadId) {
-      await atomic(file, JSON.stringify({ version: 1, id: randomUUID(), bootId, sourceRoot: source, codexHome: home, project: project.path, threadId: project.threadId, journalEntryHash: entryHash(entries[0]) }));
+      await atomic(file, JSON.stringify({ version: 1, id: randomUUID(), bootId, sourceRoot: source, codexHome: home, project: project.path, threadId: project.threadId, journalEntryHash: entryHash(entries[0]) }), 0o600, { directory: stateRoot, privacy });
     }
     else if (!matchingWitness) report.error = 'The stored history witness is invalid; it cannot prove reboot persistence.';
   } catch (error) { report.error = redact(error.message); }

@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { fixturePrivateState } from './fixture-private-state.mjs';
 import { probePersistentHistory, probeCodexRuntime, evaluateBootRuntime } from '../app/runtime-verification.mjs';
 
 test('readable persistent state without a boot identity never creates or accepts a reboot witness', async () => {
@@ -14,11 +15,15 @@ test('readable persistent state without a boot identity never creates or accepts
     const project = { path: path.parse(directory).root, threadId: 'saved-thread' };
     await fs.writeFile(path.join(state, 'state.json'), JSON.stringify({ selected: project.path, projects: { [project.path]: project } }));
     await fs.writeFile(path.join(state, 'journal.jsonl'), JSON.stringify({ type: 'notice', time: new Date().toISOString() }) + '\n');
-    const history = await probePersistentHistory({ directory: state, codexHome, sourceRoot, osRoot: project.path, project });
+    const history = await probePersistentHistory({ directory: state, codexHome, sourceRoot, osRoot: project.path, project, privacy: fixturePrivateState(directory) });
     assert.equal(history.storageConfigured, true); assert.equal(history.historyReadable, true); assert.equal(history.survivedBoot, false);
     await assert.rejects(fs.stat(path.join(state, 'runtime-history-witness.json')), { code: 'ENOENT' });
     assert.equal(evaluateBootRuntime({ edition: 'WinVOS', history }).checks.persistentHistory, false);
-  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+  } finally {
+    const resolved = await fs.realpath(directory), relative = path.relative(await fs.realpath(os.tmpdir()), resolved);
+    assert.ok(relative.startsWith('volterra-unknown-boot-') && !relative.includes(path.sep));
+    await fs.rm(resolved, { recursive: true });
+  }
 });
 
 test('native Node command stays read-only and cannot run until Codex sandbox readiness succeeds', async () => {

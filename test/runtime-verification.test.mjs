@@ -6,6 +6,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
+import { fixturePrivateState } from './fixture-private-state.mjs';
 import { probeCodexRuntime, probePersistentHistory, evaluateBootRuntime, inspectBrowserCapture, waitForHelperRuntime } from '../app/runtime-verification.mjs';
 
 const ready = () => ({
@@ -145,7 +146,7 @@ test('Codex directory junctions cannot escape persistent storage or point into p
   const codexHome = path.join(state, 'codex');
   try {
     await Promise.all([fs.mkdir(sourceRoot), fs.mkdir(state), fs.mkdir(outside)]);
-    const options = { directory: state, codexHome, sourceRoot, osRoot: path.parse(directory).root, bootId: 'boot-one', project: { path: path.parse(directory).root, threadId: 'saved-thread' } };
+    const options = { directory: state, codexHome, sourceRoot, osRoot: path.parse(directory).root, bootId: 'boot-one', project: { path: path.parse(directory).root, threadId: 'saved-thread' }, privacy: fixturePrivateState(directory) };
     for (const target of [outside, sourceRoot]) {
       await fs.symlink(target, codexHome, process.platform === 'win32' ? 'junction' : 'dir');
       const result = await probePersistentHistory(options);
@@ -160,7 +161,7 @@ test('Codex directory junctions cannot escape persistent storage or point into p
     await fs.unlink(codexHome);
     const privateHistory = path.join(state, 'history'); await fs.mkdir(privateHistory);
     await fs.symlink(privateHistory, codexHome, process.platform === 'win32' ? 'junction' : 'dir');
-    assert.equal((await probePersistentHistory({ ...options, project: { path: options.project.path, threadId: null } })).storageConfigured, true);
+    assert.equal((await probePersistentHistory({ ...options, project: { path: options.project.path, threadId: null } })).storageConfigured, false);
     await fs.unlink(codexHome);
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
@@ -199,7 +200,7 @@ test('history requires a readable saved thread on external persistent storage an
     const project = { path: path.parse(directory).root, threadId: 'saved-thread' };
     await fs.writeFile(path.join(state, 'state.json'), JSON.stringify({ selected: project.path, projects: { [project.path]: project } }));
     await fs.writeFile(path.join(state, 'journal.jsonl'), JSON.stringify({ type: 'message', time: '2026-10-11T00:00:00Z', data: 'saved' }) + '\npartial last line');
-    const options = { directory: state, codexHome, sourceRoot, osRoot: project.path, bootId: 'boot-one', project };
+    const options = { directory: state, codexHome, sourceRoot, osRoot: project.path, bootId: 'boot-one', project, privacy: fixturePrivateState(directory) };
     const empty = await probePersistentHistory({ ...options, project: { path: project.path, threadId: null } });
     assert.equal(empty.storageConfigured, true); assert.equal(empty.historyReadable, false);
     const first = await probePersistentHistory(options);
@@ -219,6 +220,29 @@ test('history requires a readable saved thread on external persistent storage an
     await fs.writeFile(path.join(state, 'state.json'), JSON.stringify({ selected: project.path, projects: { [project.path]: { ...project, threadId: 'another-thread' } } }));
     assert.equal((await probePersistentHistory({ ...options, bootId: 'boot-three' })).historyReadable, false);
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('unverified State or selected Codex home cannot read history or create a reboot witness', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'volterra-history-private-'));
+  try {
+    const sourceRoot = path.join(directory, 'source'), state = path.join(directory, 'state'), codexHome = path.join(state, 'codex');
+    await fs.mkdir(sourceRoot); await fs.mkdir(codexHome, { recursive: true });
+    const project = { path: path.parse(directory).root, threadId: 'saved-thread' }, check = fixturePrivateState(directory);
+    // Deliberately invalid bytes must not be parsed when privacy refuses first.
+    await fs.writeFile(path.join(state, 'state.json'), '{unread private fixture');
+    for (const scope of ['state', 'codex']) {
+      const calls = [];
+      const privacy = async options => { calls.push(options); if (options.scope === scope) throw new Error('Synthetic private storage refusal.'); return check(options); };
+      const result = await probePersistentHistory({ directory: state, codexHome, sourceRoot, osRoot: project.path, bootId: 'boot-one', project, privacy });
+      assert.equal(result.storageConfigured, false); assert.equal(result.historyReadable, false); assert.equal(result.survivedBoot, false);
+      assert.equal(result.error, 'Synthetic private storage refusal.');
+      assert.equal(calls[0].directory, state); if (scope === 'codex') assert.equal(calls[1].directory, codexHome);
+      await assert.rejects(fs.stat(path.join(state, 'runtime-history-witness.json')), { code: 'ENOENT' });
+    }
+  } finally {
+    const real = await fs.realpath(directory), relative = path.relative(await fs.realpath(os.tmpdir()), real);
+    assert.ok(relative.startsWith('volterra-history-private-') && !relative.includes(path.sep)); await fs.rm(real, { recursive: true });
+  }
 });
 
 test('browser evidence requires helper script output and a captured PNG at the approved viewport', async () => {

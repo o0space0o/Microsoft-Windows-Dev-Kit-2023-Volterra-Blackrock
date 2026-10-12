@@ -22,15 +22,18 @@ if ($LASTEXITCODE -ne 0) { throw 'The immutable source receipt could not be veri
 $checked=$verified | ConvertFrom-Json
 if ($checked.checksPassed -ne $true -or $checked.commit -notmatch '^[a-f0-9]{40}$') { throw 'The facts build requires an actually checked source commit.' }
 $source=Guard (Join-Path $checked.source 'scripts\Probe-WindowsFacts.cs')
+$privateStateSource=Guard (Join-Path $checked.source 'scripts\Private-WindowsState.cs')
 $buildScript=Guard $PSCommandPath
 $sourceHash=Hash $source
+$privateStateSourceHash=Hash $privateStateSource
 $scriptHash=Hash $buildScript
-if ($sourceHash -ne $checked.files.'scripts/Probe-WindowsFacts.cs' -or $scriptHash -ne $checked.files.'scripts/Build-WindowsFacts.ps1') { throw 'The facts source or build script differs from the checked snapshot.' }
+if ($sourceHash -ne $checked.files.'scripts/Probe-WindowsFacts.cs' -or $privateStateSourceHash -ne $checked.files.'scripts/Private-WindowsState.cs' -or $scriptHash -ne $checked.files.'scripts/Build-WindowsFacts.ps1') { throw 'The facts source or build script differs from the checked snapshot.' }
 $compiler=Join-Path $env:SystemRoot 'Microsoft.NET\FrameworkArm64\v4.0.30319\csc.exe'
 $management=Join-Path (Split-Path $compiler) 'System.Management.dll'
 $systemAssembly=Join-Path (Split-Path $compiler) 'System.dll'
+$collectionsAssembly=Join-Path (Split-Path $compiler) 'System.Core.dll'
 $coreAssembly=Join-Path (Split-Path $compiler) 'mscorlib.dll'
-foreach ($dependency in @($compiler,$management,$systemAssembly,$coreAssembly)) {
+foreach ($dependency in @($compiler,$management,$systemAssembly,$collectionsAssembly,$coreAssembly)) {
     $item=Get-Item -LiteralPath $dependency -Force
     # Windows component files use ordinary NTFS hardlinks. Only these fixed,
     # read-only signed framework leaves permit them; source and output do not.
@@ -43,23 +46,25 @@ foreach ($dependency in @($compiler,$management,$systemAssembly,$coreAssembly)) 
     }
     if ((Get-AuthenticodeSignature -LiteralPath $dependency).Status -ne 'Valid') { throw 'The local Microsoft build dependency signature is invalid.' }
 }
-$compilerHash=Hash $compiler; $managementHash=Hash $management; $systemHash=Hash $systemAssembly; $coreHash=Hash $coreAssembly
+$compilerHash=Hash $compiler; $managementHash=Hash $management; $systemHash=Hash $systemAssembly; $collectionsHash=Hash $collectionsAssembly; $coreHash=Hash $coreAssembly
 $target=Guard (Join-Path $tools 'volterra-facts.exe')
 $manifest=Guard (Join-Path $tools 'volterra-facts-build.json')
 foreach ($file in @($target,$manifest)) { if (Get-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue) { throw 'Existing facts build output will not be overwritten.' } }
 $temporary=Guard (Join-Path $tools ('volterra-facts-'+[Guid]::NewGuid().ToString('N')+'.exe'))
 $log=Guard (Join-Path $workspace ('build\verification\facts-compile-'+[Guid]::NewGuid().ToString('N')+'.txt'))
 $sourceLock=[IO.File]::Open($source,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+$privateStateSourceLock=$null
 try {
-    & $compiler /nologo /noconfig /target:exe /platform:anycpu /optimize+ "/reference:$management" "/reference:$systemAssembly" "/out:$temporary" $source > $log 2>&1
+    $privateStateSourceLock=[IO.File]::Open($privateStateSource,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    & $compiler /nologo /noconfig /target:exe /platform:anycpu /optimize+ "/reference:$management" "/reference:$systemAssembly" "/reference:$collectionsAssembly" "/out:$temporary" $source $privateStateSource > $log 2>&1
     if ($LASTEXITCODE -ne 0) { throw "The original facts helper did not compile. See $log" }
-} finally { $sourceLock.Dispose() }
+} finally { $sourceLock.Dispose();if ($null -ne $privateStateSourceLock) { $privateStateSourceLock.Dispose() } }
 $temporary=Guard $temporary
-if ((Hash $source) -ne $sourceHash -or (Hash $buildScript) -ne $scriptHash -or (Hash $compiler) -ne $compilerHash -or (Hash $management) -ne $managementHash -or (Hash $systemAssembly) -ne $systemHash -or (Hash $coreAssembly) -ne $coreHash) { throw 'A facts build input changed during compilation.' }
+if ((Hash $source) -ne $sourceHash -or (Hash $privateStateSource) -ne $privateStateSourceHash -or (Hash $buildScript) -ne $scriptHash -or (Hash $compiler) -ne $compilerHash -or (Hash $management) -ne $managementHash -or (Hash $systemAssembly) -ne $systemHash -or (Hash $collectionsAssembly) -ne $collectionsHash -or (Hash $coreAssembly) -ne $coreHash) { throw 'A facts build input changed during compilation.' }
 $toolHash=Hash $temporary
 $bytes=(Get-Item -LiteralPath $temporary).Length
 if ($bytes -lt 1024 -or $bytes -gt 1048576) { throw 'The original facts executable size was unsupported.' }
-$proof=@{version=1;kind='volterraWindowsFactsBuild';sourceCommit=$checked.commit;sourceFile='scripts/Probe-WindowsFacts.cs';sourceSHA256=$sourceHash;buildScript='scripts/Build-WindowsFacts.ps1';buildScriptSHA256=$scriptHash;executable=@{file='private/tools/volterra-facts.exe';SHA256=$toolHash;bytes=$bytes;target='AnyCPU; ARM64 Windows CLR required'};compiler=@{path=$compiler;SHA256=$compilerHash;fileVersion=(Get-Item -LiteralPath $compiler).VersionInfo.FileVersion};managementAssembly=@{path=$management;SHA256=$managementHash;fileVersion=(Get-Item -LiteralPath $management).VersionInfo.FileVersion};systemAssembly=@{path=$systemAssembly;SHA256=$systemHash;fileVersion=(Get-Item -LiteralPath $systemAssembly).VersionInfo.FileVersion};coreAssembly=@{path=$coreAssembly;SHA256=$coreHash;fileVersion=(Get-Item -LiteralPath $coreAssembly).VersionInfo.FileVersion};guestCompatibilityVerified=$false;compiledAt=[DateTime]::UtcNow.ToString('o');compileLog=$log}
+$proof=@{version=1;kind='volterraWindowsFactsBuild';sourceCommit=$checked.commit;sourceFile='scripts/Probe-WindowsFacts.cs';sourceSHA256=$sourceHash;privateStateSourceFile='scripts/Private-WindowsState.cs';privateStateSourceSHA256=$privateStateSourceHash;buildScript='scripts/Build-WindowsFacts.ps1';buildScriptSHA256=$scriptHash;executable=@{file='private/tools/volterra-facts.exe';SHA256=$toolHash;bytes=$bytes;target='AnyCPU; ARM64 Windows CLR required'};compiler=@{path=$compiler;SHA256=$compilerHash;fileVersion=(Get-Item -LiteralPath $compiler).VersionInfo.FileVersion};managementAssembly=@{path=$management;SHA256=$managementHash;fileVersion=(Get-Item -LiteralPath $management).VersionInfo.FileVersion};systemAssembly=@{path=$systemAssembly;SHA256=$systemHash;fileVersion=(Get-Item -LiteralPath $systemAssembly).VersionInfo.FileVersion};collectionsAssembly=@{path=$collectionsAssembly;SHA256=$collectionsHash;fileVersion=(Get-Item -LiteralPath $collectionsAssembly).VersionInfo.FileVersion};coreAssembly=@{path=$coreAssembly;SHA256=$coreHash;fileVersion=(Get-Item -LiteralPath $coreAssembly).VersionInfo.FileVersion};guestCompatibilityVerified=$false;compiledAt=[DateTime]::UtcNow.ToString('o');compileLog=$log}
 Guard $target | Out-Null; Guard $manifest | Out-Null
 [IO.File]::Move($temporary,$target)
 $writer=[IO.File]::Open($manifest,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)

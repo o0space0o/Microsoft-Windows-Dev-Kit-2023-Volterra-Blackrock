@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArguments, volumeIdentity, ownedPath, selectPersistentStorage, prepareBootPaths, writeLaunchEvidence } from '../scripts/Start-Volterra.mjs';
+import { fixturePrivateState } from './fixture-private-state.mjs';
 
 const volume = '\\\\?\\Volume{741d77ce-a5ee-4544-a158-b62783007d27}\\';
 async function fixture(t) {
@@ -19,7 +20,7 @@ async function fixture(t) {
   const root = path.join(systemRoot, 'Volterra');
   await fs.mkdir(root, { recursive: true }); await fs.mkdir(persistent);
   await fs.writeFile(path.join(persistent, 'Volterra-persistent.tag'), 'Development test');
-  return { directory, systemRoot, persistent, root };
+  return { directory, systemRoot, persistent, root, privacy: fixturePrivateState(directory) };
 }
 
 test('startup invokes staged Node directly without changing script policy', async () => {
@@ -42,7 +43,7 @@ test('RAM boot chooses one marked writable volume and isolates state from OS sou
   assert.equal(result.stateDirectory, path.join(f.persistent, 'VolterraState'));
   assert.equal(result.projectRootPersistent, false); assert.equal(result.volume, volume);
   assert.deepEqual(calls, [f.persistent]);
-  assert.deepEqual(await fs.readdir(result.stateDirectory), []);
+  assert.deepEqual((await fs.readdir(result.stateDirectory)).sort(), ['browser', 'codex', 'github']);
 });
 
 test('OS root mode refuses another edition and an unrelated payload before creating state', async t => {
@@ -72,13 +73,29 @@ test('redirected state directories and linked markers cannot receive writes', as
 
 test('launcher evidence cannot declare runtime acceptance and refuses hardlinked destination', async t => {
   const f = await fixture(t); const state = path.join(f.persistent, 'VolterraState'); await fs.mkdir(state);
-  await writeLaunchEvidence(state, { stage: 'Listening', helperListening: true, bootAccepted: true, runtimeAccepted: true, physicalHardwareAccepted: true });
+  await writeLaunchEvidence(state, { stage: 'Listening', helperListening: true, bootAccepted: true, runtimeAccepted: true, physicalHardwareAccepted: true }, { privacy: f.privacy });
   const evidence = JSON.parse(await fs.readFile(path.join(state, 'boot-launch.json'), 'utf8'));
   assert.equal(evidence.helperListening, true);
   assert.equal(evidence.bootAccepted, false); assert.equal(evidence.runtimeAccepted, false); assert.equal(evidence.physicalHardwareAccepted, false);
   const external = path.join(f.directory, 'external-evidence'); await fs.link(path.join(state, 'boot-launch.json'), external);
   const original = await fs.readFile(external);
-  await assert.rejects(writeLaunchEvidence(state, { stage: 'Stopped' }), /multiple links/);
+  await assert.rejects(writeLaunchEvidence(state, { stage: 'Stopped' }, { privacy: f.privacy }), /multiple links/);
   assert.deepEqual(await fs.readFile(external), original);
   await assert.rejects(ownedPath(external), /multiple links/);
+});
+
+test('boot privacy refusal occurs before creating state or a write witness', async t => {
+  const f = await fixture(t); let checked = 0;
+  await assert.rejects(prepareBootPaths({ ...f, ramdisk: true, edition: 'WinVOS', roots: [f.persistent], readVolume: async () => volume,
+    privacy: async options => { checked++; assert.equal(options.directory, path.join(f.persistent, 'VolterraState')); assert.equal(options.volume, volume); assert.equal(options.create, true); throw new Error('Fixture privacy refused.'); } }), /privacy refused/);
+  assert.equal(checked, 1);
+  await assert.rejects(fs.access(path.join(f.persistent, 'VolterraState')), { code: 'ENOENT' });
+});
+
+test('evidence privacy refusal preserves existing bytes and creates no temporary file', async t => {
+  const f = await fixture(t); const state = path.join(f.persistent, 'VolterraState'); await fs.mkdir(state);
+  const file = path.join(state, 'boot-launch.json'); const original = Buffer.from('{"private":"fixture"}'); await fs.writeFile(file, original);
+  await assert.rejects(writeLaunchEvidence(state, { stage: 'Listening' }, { privacy: async () => { throw new Error('Fixture privacy refused.'); } }), /privacy refused/);
+  assert.deepEqual(await fs.readFile(file), original);
+  assert.deepEqual(await fs.readdir(state), ['boot-launch.json']);
 });

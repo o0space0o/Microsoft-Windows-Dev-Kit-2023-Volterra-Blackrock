@@ -1,14 +1,20 @@
 import test from 'node:test';
+import { fixturePrivateState } from './fixture-private-state.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'volterra-test-'));
 process.env.VOLTERRA_STATE_DIR = path.join(directory, 'state');
+process.env.CODEX_HOME = path.join(directory, 'state', 'codex');
+process.env.GH_CONFIG_DIR = path.join(directory, 'state', 'github');
+const statePrivacy = fixturePrivateState(directory);
 const { projectPath } = await import('../app/storage.mjs');
-const { createApplication } = await import('../app/server.mjs');
+const { createApplication: createApplicationChecked } = await import('../app/server.mjs');
+const createApplication = options => createApplicationChecked({ statePrivacy, githubAccountReader: async () => { throw new Error('Fixture has no GitHub account.'); }, ...options });
 const { redact } = await import('../app/platform.mjs');
 
 // These interactive fixtures must not inherit the launcher's automatic queue or use live Git.
@@ -116,6 +122,38 @@ test('public ChatGPT sign-in endpoint uses native Codex browser authorization wi
     assert.equal(app.state.authMode, 'codex');
     await assert.rejects(fs.stat(path.join(process.env.VOLTERRA_STATE_DIR, 'chatgpt.dpapi')), { code: 'ENOENT' });
   } finally { await app.close(); }
+});
+
+test('unverified browser privacy blocks ChatGPT login before an authorization flow starts', async () => {
+  const fake = new FakeCodex(); let opened = false;
+  const app = await createInteractiveFixture({ port: 0, codex: fake, browserOpener: async () => { opened = true; },
+    statePrivacy: options => options.scope === 'browser' ? Promise.reject(new Error('Fixture browser privacy refused.')) : statePrivacy(options) });
+  try {
+    await assert.rejects(app.actions['chatgpt/sign-in']({}), /browser privacy refused/);
+    assert.equal(fake.calls.some(call => call.method === 'account/login/start'), false);
+    assert.equal(opened, false);
+  } finally { await app.close(); }
+});
+
+test('GitHub authorization launches with the verified configured browser namespace', async () => {
+  const previous = process.env.VOLTERRA_BROWSER_PROFILE, profile = path.join(directory, 'configured-browser');
+  await fs.mkdir(profile); await fs.writeFile(path.join(profile, 'existing-profile.fixture'), 'Existing browser fixture');
+  process.env.VOLTERRA_BROWSER_PROFILE = profile;
+  const checked = [], launches = [];
+  const app = await createInteractiveFixture({ port: 0, codex: new FakeCodex(), statePrivacy: async options => {
+    checked.push({ directory: options.directory, scope: options.scope }); return statePrivacy(options);
+  }, githubSpawner(executable, args, options) {
+    launches.push({ executable, args, options });
+    const child = new EventEmitter(); child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); return child;
+  } });
+  try {
+    await app.actions['github/sign-in']();
+    assert.equal(launches.length, 1);
+    assert.deepEqual(launches[0].args, ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web']);
+    assert.equal(launches[0].options.env.VOLTERRA_BROWSER_PROFILE, profile);
+    assert.ok(checked.some(value => value.scope === 'browser' && value.directory === profile));
+    assert.equal(await fs.readFile(path.join(profile, 'existing-profile.fixture'), 'utf8'), 'Existing browser fixture');
+  } finally { await app.close(); if (previous === undefined) delete process.env.VOLTERRA_BROWSER_PROFILE; else process.env.VOLTERRA_BROWSER_PROFILE = previous; }
 });
 
 test('without the automatic queue, OS root is selected and completed sign-in starts the project brief once', async () => {

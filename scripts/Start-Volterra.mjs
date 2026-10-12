@@ -5,6 +5,7 @@ import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { ensurePrivateState } from '../app/private-state.mjs';
 
 const execute = promisify(execFile);
 const samePath = (left, right) => path.relative(path.resolve(left), path.resolve(right)) === '';
@@ -74,7 +75,7 @@ export async function selectPersistentStorage({ systemRoot, roots, readVolume })
   return candidates[0];
 }
 
-export async function prepareBootPaths({ root, systemRoot, ramdisk, edition, roots, readVolume }) {
+export async function prepareBootPaths({ root, systemRoot, ramdisk, edition, roots, readVolume, privacy = ensurePrivateState }) {
   if (edition !== 'WinVOS') throw new Error('OS root mode is restricted to the Validation OS image.');
   root = await ownedPath(root, 'directory');
   systemRoot = await ownedPath(systemRoot, 'directory');
@@ -82,7 +83,8 @@ export async function prepareBootPaths({ root, systemRoot, ramdisk, edition, roo
   const storage = ramdisk ? await selectPersistentStorage({ systemRoot, roots, readVolume }) : { root: systemRoot, volume: volumeIdentity(await readVolume(systemRoot)) };
   const directory = path.join(storage.root, 'VolterraState');
   if (contained(root, directory) || (ramdisk && contained(systemRoot, directory))) throw new Error('Persistent account and project state must stay outside the boot payload and RAM disk.');
-  await ensureDirectory(directory);
+  await privacy({ directory, volume: storage.volume, scope: 'state', create: true, root });
+  await ownedPath(directory, 'directory');
   const witness = path.join(directory, `.write-check-${randomUUID()}`);
   await fs.writeFile(witness, 'Persistent state write check', { flag: 'wx', mode: 0o600 });
   await ownedPath(witness);
@@ -90,7 +92,8 @@ export async function prepareBootPaths({ root, systemRoot, ramdisk, edition, roo
   return { systemRoot, stateDirectory: directory, storageRoot: storage.root, volume: storage.volume, projectRootPersistent: !ramdisk };
 }
 
-export async function writeLaunchEvidence(directory, value) {
+export async function writeLaunchEvidence(directory, value, { privacy = ensurePrivateState } = {}) {
+  await privacy({ directory, volume: value.volume || '', scope: 'state' });
   await ownedPath(directory, 'directory');
   const destination = path.join(directory, 'boot-launch.json');
   try { await ownedPath(destination); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -156,13 +159,17 @@ export async function launch(options) {
     const edition = /^\s*EditionID\s+REG_SZ\s+(\S+)\s*$/mi.exec(editionOutput)?.[1];
     const roots = Array.from({ length: 26 }, (_, index) => `${String.fromCharCode(65 + index)}:\\`);
     boot = await prepareBootPaths({ root, systemRoot, ramdisk: env.SystemDrive.toUpperCase() === 'X:', edition, roots, readVolume: volume => nativeOutput(mountvol, [volume, '/L'], env) });
-    Object.assign(env, { VOLTERRA_OS_ROOT: boot.systemRoot, VOLTERRA_STATE_DIR: boot.stateDirectory, CODEX_HOME: path.join(boot.stateDirectory, 'codex'), GH_CONFIG_DIR: path.join(boot.stateDirectory, 'github'), VOLTERRA_AUTOSTART: '1', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'safe.directory', GIT_CONFIG_VALUE_0: root });
-    for (const name of ['codex', 'github', 'browser']) await ensureDirectory(path.join(boot.stateDirectory, name));
+    Object.assign(env, { VOLTERRA_OS_ROOT: boot.systemRoot, VOLTERRA_STATE_DIR: boot.stateDirectory, VOLTERRA_STATE_VOLUME: boot.volume, CODEX_HOME: path.join(boot.stateDirectory, 'codex'), GH_CONFIG_DIR: path.join(boot.stateDirectory, 'github'), VOLTERRA_AUTOSTART: '1', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'safe.directory', GIT_CONFIG_VALUE_0: root });
     await writeLaunchEvidence(boot.stateDirectory, { stage: 'Preparing', edition, ...boot, stateWritable: true, stateSurvivedRestart: false, sourceHealthConfirmed: false });
     const updater = await ownedPath(path.join(root, 'private', 'bootstrap', 'Apply-SourceUpdate.mjs'));
     await runChild(node, [updater, boot.stateDirectory, root, 'apply', git], { cwd: root, env });
   }
-  env.VOLTERRA_BROWSER_PROFILE = boot ? path.join(boot.stateDirectory, 'browser') : (env.VOLTERRA_BROWSER_PROFILE || path.join(env.LOCALAPPDATA || root, 'VolterraWorkspace', 'browser'));
+  if (!boot) {
+    env.VOLTERRA_STATE_DIR ||= path.join(env.LOCALAPPDATA || path.join(process.env.USERPROFILE || '', '.local', 'share'), 'VolterraWorkspace');
+    await ensurePrivateState({ directory: env.VOLTERRA_STATE_DIR, scope: 'state', create: true, root });
+  }
+  env.VOLTERRA_BROWSER_PROFILE = boot ? path.join(boot.stateDirectory, 'browser') : (env.VOLTERRA_BROWSER_PROFILE || path.join(env.VOLTERRA_STATE_DIR, 'browser'));
+  await ensurePrivateState({ directory: env.VOLTERRA_BROWSER_PROFILE, scope: 'browser', create: true, root });
   await reservePort(options.port);
   const server = await ownedPath(path.join(root, 'app', 'server.mjs'));
   console.log(`Microsoft Volterra workspace: http://127.0.0.1:${options.port}`);

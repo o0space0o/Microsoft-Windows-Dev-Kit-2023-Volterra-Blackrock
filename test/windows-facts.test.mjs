@@ -35,6 +35,7 @@ test('a failed provider preserves exact process proof while missing browser pres
   const bootOnly = inspectWindowsFacts(browserFailure, options);
   assert.equal(bootOnly.bootIdentityObserved, true); assert.equal(bootOnly.browserImageObserved, false);
   assert.equal(allowedSource('scripts/Probe-WindowsFacts.cs'), true);
+  assert.equal(allowedSource('scripts/Private-WindowsState.cs'), true);
   assert.equal(allowedSource('scripts/Unreviewed.cs'), false); assert.equal(allowedSource('private/tools/volterra-facts.exe'), false);
 });
 

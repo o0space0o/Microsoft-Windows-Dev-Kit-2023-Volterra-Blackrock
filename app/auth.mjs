@@ -26,10 +26,10 @@ export async function validateIdentity(token, clientId, nonce) {
   return claims;
 }
 export class ChatGPTSignIn {
-  constructor(state, onComplete, onStatus) { this.state = state; this.onComplete = onComplete; this.onStatus = onStatus; }
+  constructor(state, onComplete, onStatus, storageOptions = {}) { this.state = state; this.onComplete = onComplete; this.onStatus = onStatus; this.storageOptions = storageOptions; }
   async begin() {
     if (this.listener) throw new Error('A browser sign-in is already pending.');
-    const previous = await readCredential();
+    const previous = await readCredential(this.storageOptions);
     const transaction = { state: random(), nonce: random(), verifier: random(), clientId: previous?.client_id || 'dynamic_agent_client' };
     const listener = http.createServer(async (request, response) => {
       try {
@@ -47,7 +47,7 @@ export class ChatGPTSignIn {
         if (previous && previous.subject !== identity.sub) throw new Error('The returning ChatGPT account did not match.');
         const scopes = String(tokens.scope || '').split(' ');
         if (!scopes.includes('chatgpt.tokens.use.direct') || !scopes.includes('resource.invoke') || !tokens.access_token || tokens.token_type?.toLowerCase() !== 'bearer' || !Number.isFinite(tokens.expires_in) || tokens.expires_in <= 0) throw new Error('ChatGPT plan permission or valid token lifetime was not granted.');
-        await saveCredential({ ...tokens, client_id: issued, subject: identity.sub, email: identity.email, issuer, scopes, saved_at: Date.now(), ext_agent_host_id: this.state.hostId });
+        await saveCredential({ ...tokens, client_id: issued, subject: identity.sub, email: identity.email, issuer, scopes, saved_at: Date.now(), ext_agent_host_id: this.state.hostId }, this.storageOptions);
         response.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' }).end('ChatGPT sign-in completed. Return to Microsoft Volterra.');
         await this.onComplete();
       } catch (error) {
@@ -69,7 +69,7 @@ export class ChatGPTSignIn {
   }
   cancel() { clearTimeout(this.timer); this.listener?.close(); this.listener = null; }
   async accessToken() {
-    let credential = await readCredential();
+    let credential = await readCredential(this.storageOptions);
     if (!credential) throw new Error('Continue with ChatGPT before starting the agent.');
     if (Date.now() < credential.saved_at + (credential.expires_in - 120) * 1000) return credential.access_token;
     if (!this.refreshing) this.refreshing = (async () => {
@@ -78,7 +78,7 @@ export class ChatGPTSignIn {
       const scopes = tokens.scope ? tokens.scope.split(' ') : credential.scopes;
       if (!scopes.includes('chatgpt.tokens.use.direct') || !tokens.access_token) throw new Error('ChatGPT plan access needs new authorization.');
       credential = { ...credential, ...tokens, scopes, saved_at: Date.now() };
-      await saveCredential(credential);
+      await saveCredential(credential, this.storageOptions);
       return credential.access_token;
     })().finally(() => { this.refreshing = null; });
     return this.refreshing;

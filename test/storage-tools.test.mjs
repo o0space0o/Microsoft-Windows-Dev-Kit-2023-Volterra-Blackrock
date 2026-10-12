@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { fixturePrivateState } from './fixture-private-state.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -7,8 +8,12 @@ import { EventEmitter } from 'node:events';
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'volterra-storage-test-'));
 process.env.VOLTERRA_STATE_DIR = path.join(directory, 'state');
+process.env.CODEX_HOME = path.join(directory, 'state', 'codex');
+process.env.GH_CONFIG_DIR = path.join(directory, 'state', 'github');
+const statePrivacy = fixturePrivateState(directory);
 const { storageQuery, collectStorage, inspectStorage, storageReport } = await import('../app/storage-tools.mjs');
-const { createApplication } = await import('../app/server.mjs');
+const { createApplication: createApplicationChecked } = await import('../app/server.mjs');
+const createApplication = options => createApplicationChecked({ statePrivacy, githubAccountReader: async () => { throw new Error('Fixture has no GitHub account.'); }, ...options });
 const { describeProgress } = await import('../app/public/progress.js');
 const evidence = (workspace = directory, patch = {}) => ({ version: 1, kind: 'storage', status: 'passed', error: null, requestedWorkspace: workspace, workspace,
   observedAt: '2026-10-11T17:33:00.000Z', system: { platform: 'win32', release: 'fixture', runtimeArchitecture: 'arm64' },

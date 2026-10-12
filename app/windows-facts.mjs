@@ -1,6 +1,6 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { readPrivateInput } from './private-state.mjs';
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex').toUpperCase();
 const timestamp = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$/.test(value) && Number.isFinite(Date.parse(value));
@@ -49,17 +49,23 @@ export async function readWindowsFacts({ root, execute, guard, browserPid, brows
   const manifestFile = path.join(root, 'private', 'tools', 'volterra-facts-build.json');
   const versionFile = path.join(root, 'private', 'source-version.json');
   for (const file of [executable, manifestFile, versionFile]) await guard(file, root);
-  const [manifestBytes, versionBytes, executableBytes] = await Promise.all([fs.readFile(manifestFile), fs.readFile(versionFile), fs.readFile(executable)]);
+  const read = (file, maximum) => readPrivateInput(file, maximum, { guard: value => guard(value, root) });
+  const [manifestBytes, versionBytes, executableBytes] = await Promise.all([read(manifestFile, 32768), read(versionFile, 65536), read(executable, 1048576)]);
   if (manifestBytes.length > 32768 || versionBytes.length > 65536 || executableBytes.length > 1048576) throw new Error('Native Windows facts provenance exceeds the supported size.');
   const manifest = JSON.parse(manifestBytes.toString('utf8').replace(/^\uFEFF/, '')), version = JSON.parse(versionBytes.toString('utf8').replace(/^\uFEFF/, ''));
   const inputs = [[executable, executableBytes], [manifestFile, manifestBytes], [versionFile, versionBytes]];
-  if (manifest.version !== 1 || manifest.kind !== 'volterraWindowsFactsBuild' || !/^[a-f0-9]{40}$/.test(manifest.sourceCommit) || manifest.sourceCommit !== version.commit
+  if (manifest.version !== 1 || manifest.kind !== 'volterraWindowsFactsBuild' || !/^[a-f0-9]{40}$/.test(manifest.sourceCommit) || !/^[a-f0-9]{40}$/.test(version.commit || '')
     || version.repository !== 'o0space0o/Microsoft-Windows-Dev-Kit-2023-Volterra-Blackrock' || manifest.sourceFile !== 'scripts/Probe-WindowsFacts.cs' || manifest.buildScript !== 'scripts/Build-WindowsFacts.ps1'
     || manifest.executable?.file !== 'private/tools/volterra-facts.exe' || manifest.executable.bytes !== executableBytes.length || !/^[A-F0-9]{64}$/.test(manifest.executable.SHA256) || manifest.executable.SHA256 !== digest(executableBytes)
     || !/^[A-F0-9]{64}$/.test(manifest.sourceSHA256) || !/^[A-F0-9]{64}$/.test(manifest.buildScriptSHA256)) throw new Error('The native Windows facts tool is not bound to this sealed source.');
-  for (const [file, expected] of [[manifest.sourceFile, manifest.sourceSHA256], [manifest.buildScript, manifest.buildScriptSHA256]]) {
+  const sourceInputs = [[manifest.sourceFile, manifest.sourceSHA256], [manifest.buildScript, manifest.buildScriptSHA256]];
+  if (manifest.privateStateSourceFile !== undefined || manifest.privateStateSourceSHA256 !== undefined) {
+    if (manifest.privateStateSourceFile !== 'scripts/Private-WindowsState.cs' || !/^[A-F0-9]{64}$/.test(manifest.privateStateSourceSHA256 || '')) throw new Error('The native privacy source provenance is invalid.');
+    sourceInputs.push([manifest.privateStateSourceFile, manifest.privateStateSourceSHA256]);
+  }
+  for (const [file, expected] of sourceInputs) {
     const full = path.join(root, file); await guard(full, root);
-    const bytes = await fs.readFile(full);
+    const bytes = await read(full, 1048576);
     if (digest(bytes) !== expected) throw new Error('The native Windows facts source provenance changed.');
     inputs.push([full, bytes]);
   }
@@ -68,7 +74,7 @@ export async function readWindowsFacts({ root, execute, guard, browserPid, brows
   const after = Date.now();
   if (![0, 1].includes(observation.code) || Buffer.byteLength(observation.stdout) > 32768) throw new Error('Native Windows facts could not return supported evidence.');
   for (const [file, original] of inputs) {
-    await guard(file, root); if (digest(await fs.readFile(file)) !== digest(original)) throw new Error('Native Windows facts inputs changed during inspection.');
+    await guard(file, root); if (digest(await read(file, 1048576)) !== digest(original)) throw new Error('Native Windows facts inputs changed during inspection.');
   }
   const value = JSON.parse(observation.stdout);
   if ((observation.code === 0) !== (value.status === 'passed')) throw new Error('Native Windows facts exit status disagrees with its report.');

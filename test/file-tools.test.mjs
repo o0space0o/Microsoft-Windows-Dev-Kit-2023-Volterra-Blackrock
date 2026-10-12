@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { fixturePrivateState } from './fixture-private-state.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -7,8 +8,12 @@ import { EventEmitter } from 'node:events';
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'volterra-file-test-'));
 process.env.VOLTERRA_STATE_DIR = path.join(directory, 'state');
+process.env.CODEX_HOME = path.join(directory, 'state', 'codex');
+process.env.GH_CONFIG_DIR = path.join(directory, 'state', 'github');
+const statePrivacy = fixturePrivateState(directory);
 const { fileQuery, collectFiles, inspectFiles, fileReport } = await import('../app/file-tools.mjs');
-const { createApplication } = await import('../app/server.mjs');
+const { createApplication: createApplicationChecked } = await import('../app/server.mjs');
+const createApplication = options => createApplicationChecked({ statePrivacy, githubAccountReader: async () => { throw new Error('Fixture has no GitHub account.'); }, ...options });
 const { describeProgress } = await import('../app/public/progress.js');
 const modifiedAt = '2026-10-11T18:00:00.000Z';
 const entry = { name: 'Example [source].txt', kind: 'File', sizeBytes: '9007199254740993', modifiedAt };
