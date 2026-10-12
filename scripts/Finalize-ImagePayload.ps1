@@ -3,14 +3,16 @@
 param(
     [Parameter(Mandatory=$true)][ValidatePattern('^development-[0-9]{3}$')][string]$BuildName,
     [string]$SourceReceipt,
-    [string]$CandidateDirectory
+    [string]$CandidateDirectory,
+    [string]$FeatureCompositionReceipt,
+    [ValidatePattern('^[A-F0-9]{64}$')][string]$ExpectedFeatureCompositionSHA256
 )
 $ErrorActionPreference = 'Stop'
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 . (Join-Path $PSScriptRoot 'Image-Candidate.ps1')
 $selection=Get-ImageBuildSelection $workspace $BuildName $CandidateDirectory ($PSBoundParameters.ContainsKey('CandidateDirectory'))
 $build=$selection.build
-$candidateBinding=Get-ImageCandidateBinding $selection $SourceReceipt
+$candidateBinding=Get-ImageCandidateBinding $selection $SourceReceipt $FeatureCompositionReceipt $ExpectedFeatureCompositionSHA256
 # Finalized WIMs and accepted media are immutable inputs. An update needs a
 # separately reviewed fresh candidate; never silently re-service current013.
 foreach($seal in @('Finalize-result.json','iso-receipt.json')){
@@ -24,6 +26,7 @@ function Dism([string]$Name,[string[]]$Arguments) {
 function Save-Finalization($Value){
     if($selection.candidate){
         $Value.candidateId=$selection.candidateId;$Value.artifactRoot=$build;$Value.candidateIdentitySHA256=$candidateBinding.identitySHA256;$Value.sourceReceiptSHA256=$candidateBinding.source.SHA256
+        if($candidateBinding.identity.version-eq2){$Value.featureCompositionSHA256=$candidateBinding.composition.SHA256;if($Value.status-ceq'passed'){$Value.sourceApplicationOverlayPerformed=$true;$Value.factsOverlayPerformed=$true}}
         Save-ImageCandidateJson (Join-Path $build 'Finalize-result.json') $Value $build
     }else{$Value | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $build 'Finalize-result.json') -Encoding utf8}
 }
@@ -82,7 +85,12 @@ try {
         $receipt | Add-Member -NotePropertyName artifactRoot -NotePropertyValue $build -Force
         $receipt | Add-Member -NotePropertyName candidateIdentitySHA256 -NotePropertyValue $candidateBinding.identitySHA256 -Force
         $receipt | Add-Member -NotePropertyName sourceReceiptSHA256 -NotePropertyValue $candidateBinding.source.SHA256 -Force
-        Get-ImageCandidateBinding $selection $SourceReceipt | Out-Null
+        if($candidateBinding.identity.version-eq2){
+            $receipt | Add-Member -NotePropertyName featureCompositionSHA256 -NotePropertyValue $candidateBinding.composition.SHA256 -Force
+            $receipt | Add-Member -NotePropertyName sourceApplicationOverlayPerformed -NotePropertyValue $true -Force
+            $receipt | Add-Member -NotePropertyName factsOverlayPerformed -NotePropertyValue $true -Force
+        }
+        Get-ImageCandidateBinding $selection $SourceReceipt $FeatureCompositionReceipt $ExpectedFeatureCompositionSHA256 | Out-Null
     }
     if($selection.candidate){Assert-ImageCandidatePath (Join-Path $build 'image-receipt.json') $build | Out-Null}
     $receipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $build 'image-receipt.json') -Encoding utf8

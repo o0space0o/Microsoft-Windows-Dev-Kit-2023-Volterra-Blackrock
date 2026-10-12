@@ -3,7 +3,9 @@
 param(
     [Parameter(Mandatory=$true)][ValidatePattern('^development-[0-9]{3}$')][string]$BuildName,
     [string]$SourceReceipt,
-    [string]$CandidateDirectory
+    [string]$CandidateDirectory,
+    [string]$FeatureCompositionReceipt,
+    [ValidatePattern('^[A-F0-9]{64}$')][string]$ExpectedFeatureCompositionSHA256
 )
 $ErrorActionPreference='Stop'
 $workspace=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -15,12 +17,27 @@ $candidateBinding=$null;$refreshStage=0
 function Save($value) {
     if($selection.candidate){
         $value.candidateId=$selection.candidateId;$value.artifactRoot=$build;$value.sourceCommit=$candidateBinding.identity.sourceCommit;$value.candidateIdentitySHA256=$candidateBinding.identitySHA256
+        if($candidateBinding.identity.version-eq2){$value.featureCompositionSHA256=$candidateBinding.composition.SHA256}
         $name=if($value.status-eq'running'){$script:refreshStage++;'refresh-stage-'+$script:refreshStage.ToString('00')+'.json'}else{'refresh-result.json'}
         Save-ImageCandidateJson (Join-Path $build $name) $value $build
     }else{$value | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $build 'refresh-result.json') -Encoding utf8}
 }
-if (Test-Path -LiteralPath $build) { throw 'A helper refresh build already exists and will not be overwritten.' }
+$featureRequested=([bool]$FeatureCompositionReceipt-or[bool]$ExpectedFeatureCompositionSHA256)
+$basis='development-006'
+if($featureRequested){
+    $candidateBinding=Get-ImageCandidateBinding $selection $SourceReceipt $FeatureCompositionReceipt $ExpectedFeatureCompositionSHA256
+    if($null-eq$candidateBinding-or$candidateBinding.identity.version-ne2){throw 'Explicit reviewed collected v2 candidate required.'}
+    Assert-ImageCandidateBaseInputs $selection $candidateBinding
+    foreach($seal in @('refresh-result.json','refresh-stage-01.json','Finalize-result.json','iso-receipt.json')){if(Test-Path -LiteralPath (Join-Path $build $seal)){throw 'Existing feature overlay evidence cannot be reused.'}}
+    $basis='official predefined WPF composition'
+}elseif(Test-Path -LiteralPath $build){throw 'A helper refresh build already exists and will not be overwritten.'}
 try {
+    if($featureRequested){
+        $candidateSource=$candidateBinding.source
+        $verified=& (Join-Path $workspace 'private/tools/node.exe') (Join-Path $PSScriptRoot 'Prepare-ImageSource.mjs') --verify $candidateSource.path
+        if($LASTEXITCODE-ne0-or($verified | ConvertFrom-Json).commit-cne$candidateSource.value.commit){throw 'Candidate checked source verification failed.'}
+        $SourceReceipt=$candidateSource.path
+    }else{
     $baseReceiptSHA256=(Get-FileHash -LiteralPath (Join-Path $base 'image-receipt.json')).Hash
     $receipt=Get-Content -LiteralPath (Join-Path $base 'image-receipt.json') -Raw | ConvertFrom-Json
     foreach ($kind in @('boot','install')) {
@@ -44,15 +61,17 @@ try {
         foreach ($file in @('boot.wim','install.wim','result.json')) { Copy-Item -LiteralPath (Join-Path $base ('output\'+$file)) -Destination (Join-Path $build 'output') }
         Copy-Item -LiteralPath (Join-Path $base 'image-receipt.json') -Destination $build
     }
-    Save @{status='running';base='development-006';build=$BuildName;phase='Refreshing original helper source only'}
+    }
+    Save @{status='running';base=$basis;build=$BuildName;phase='Refreshing original helper source only'}
     $nested=@{BuildName=$BuildName;SourceReceipt=$SourceReceipt}
     if($selection.candidate){$nested.CandidateDirectory=$build}
+    if($featureRequested){$nested.FeatureCompositionReceipt=$FeatureCompositionReceipt;$nested.ExpectedFeatureCompositionSHA256=$ExpectedFeatureCompositionSHA256}
     & (Join-Path $PSScriptRoot 'Finalize-ImagePayload.ps1') @nested
     if ($LASTEXITCODE -ne 0) { throw 'File-only helper overlay failed.' }
-    Save @{status='running';base='development-006';build=$BuildName;phase='Building private ARM64 ISO'}
+    Save @{status='running';base=$basis;build=$BuildName;phase='Building private ARM64 ISO'}
     & (Join-Path $PSScriptRoot 'Build-Iso.ps1') @nested
     if ($LASTEXITCODE -ne 0) { throw 'Refreshed ISO creation failed.' }
-    Save @{status='passed';base='development-006';build=$BuildName;bootTested=$false;physicalTested=$false}
+    Save @{status='passed';base=$basis;build=$BuildName;bootTested=$false;physicalTested=$false}
 } catch {
     if ((Test-Path -LiteralPath $build)-and(-not$selection.candidate-or$null-ne$candidateBinding)) { Save @{status='failed';error=$_.Exception.Message} }
     else { Write-Error $_.Exception.Message }

@@ -4,7 +4,9 @@ param(
     [Parameter(Mandatory=$true)][ValidatePattern('^development-[0-9]{3}$')][string]$BuildName,
     [string]$PrivateBootSource,
     [string]$SourceReceipt,
-    [string]$CandidateDirectory
+    [string]$CandidateDirectory,
+    [string]$FeatureCompositionReceipt,
+    [ValidatePattern('^[A-F0-9]{64}$')][string]$ExpectedFeatureCompositionSHA256
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -12,7 +14,7 @@ $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 . (Join-Path $PSScriptRoot 'Image-Candidate.ps1')
 $selection=Get-ImageBuildSelection $workspace $BuildName $CandidateDirectory ($PSBoundParameters.ContainsKey('CandidateDirectory'))
 $build=$selection.build
-$candidateBinding=Get-ImageCandidateBinding $selection $SourceReceipt
+$candidateBinding=Get-ImageCandidateBinding $selection $SourceReceipt $FeatureCompositionReceipt $ExpectedFeatureCompositionSHA256
 $media = Join-Path $build 'iso-media'
 $isoName = if ($BuildName -eq 'development-006') { 'Microsoft-Volterra-development-arm64.iso' } else { 'Microsoft-Volterra-'+$BuildName+'-arm64.iso' }
 $iso = Join-Path $build $isoName
@@ -92,6 +94,7 @@ function Save([string]$Name, $Value) {
     if (Test-Path -LiteralPath $target) { throw 'An ISO receipt will not be overwritten.' }
     if($selection.candidate){
         $Value.candidateId=$selection.candidateId;$Value.artifactRoot=$build;$Value.candidateIdentitySHA256=$candidateBinding.identitySHA256;$Value.sourceReceiptSHA256=$candidateBinding.source.SHA256
+        if($candidateBinding.identity.version-eq2){$Value.featureCompositionSHA256=$candidateBinding.composition.SHA256}
     }
     $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($Value | ConvertTo-Json -Depth 15))
     $file = [IO.File]::Open($target, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -195,22 +198,29 @@ try {
     if (-not (Test-Path -LiteralPath $finalized)) {
         $nested=@{BuildName=$BuildName;SourceReceipt=$SourceReceipt}
         if($selection.candidate){$nested.CandidateDirectory=$build}
+        if($candidateBinding-and$candidateBinding.identity.version-eq2){$nested.FeatureCompositionReceipt=$FeatureCompositionReceipt;$nested.ExpectedFeatureCompositionSHA256=$ExpectedFeatureCompositionSHA256}
         & (Join-Path $PSScriptRoot 'Finalize-ImagePayload.ps1') @nested
     }
     $finalSource = Get-Content -LiteralPath (Assert-NoReparse $finalized) -Raw | ConvertFrom-Json
-    $resultPath = Assert-NoReparse (Join-Path $build 'output/result.json')
+    $featureCandidate=($null-ne$candidateBinding-and$candidateBinding.identity.version-eq2)
+    $resultRelative=if($featureCandidate){'feature-composition.json'}else{'output/result.json'}
+    $resultPath = Assert-NoReparse (Join-Path $build $resultRelative)
     $receiptPath = Assert-NoReparse (Join-Path $build 'image-receipt.json')
     $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
     $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
     if ($finalSource.status -ne 'passed' -or $receipt.sourceCommit -notmatch '^[a-f0-9]{40}$' -or $finalSource.sourceCommit -ne $receipt.sourceCommit -or $receipt.helperBuild -ne $BuildName) { throw 'The finalized image must be bound to this build and its checked source commit.' }
     if($selection.candidate){
-        Get-ImageCandidateBinding $selection $SourceReceipt | Out-Null
+        Get-ImageCandidateBinding $selection $SourceReceipt $FeatureCompositionReceipt $ExpectedFeatureCompositionSHA256 | Out-Null
         foreach($proof in @($receipt,$finalSource)){
             if($proof.candidateId-cne$selection.candidateId-or$proof.artifactRoot-cne$build-or$proof.candidateIdentitySHA256-cne$candidateBinding.identitySHA256-or$proof.sourceReceiptSHA256-cne$candidateBinding.source.SHA256-or$proof.sourceCommit-cne$candidateBinding.identity.sourceCommit){throw 'Finalized candidate receipt binding differs.'}
         }
     }
-    if ($result.status -ne 'passed' -or $result.build -ne 'development-006') { throw 'Successful VM servicing is required.' }
-    $sealedInputs = [ordered]@{ 'Finalize-result.json'=(FileHash $finalized); 'image-receipt.json'=(FileHash $receiptPath); 'output/result.json'=(FileHash $resultPath) }
+    if($featureCandidate){
+        if((FileHash $resultPath)-cne$candidateBinding.composition.SHA256){throw 'The measured v2 composition authority changed.'}
+        foreach($proof in @($receipt,$finalSource)){if($proof.featureCompositionSHA256-cne$candidateBinding.composition.SHA256-or$proof.sourceApplicationOverlayPerformed-isnot[bool]-or-not$proof.sourceApplicationOverlayPerformed-or$proof.factsOverlayPerformed-isnot[bool]-or-not$proof.factsOverlayPerformed){throw 'Finalized feature composition/actual overlay binding differs.'}}
+    }elseif($result.status -ne 'passed' -or $result.build -ne 'development-006') { throw 'Successful VM servicing is required.' }
+    $sealedInputs = [ordered]@{ 'Finalize-result.json'=(FileHash $finalized); 'image-receipt.json'=(FileHash $receiptPath) }
+    $sealedInputs[$resultRelative]=(FileHash $resultPath)
     $bootWim = Join-Path $build 'output/boot.wim'
     $installWim = Join-Path $build 'output/install.wim'
     Require-Hash $bootWim $receipt.bootSHA256
@@ -265,7 +275,7 @@ try {
     Require-Hash $oscdimg $bootSource.oscdimg.sha256
     Require-Hash $bootSource.sourceIso.manifestPath $bootSource.sourceIso.manifestSHA256
     Require-Hash $bootSource.validationLicense.path $bootSource.validationLicense.sha256
-    if($selection.candidate){Get-ImageCandidateBinding $selection $SourceReceipt | Out-Null}
+    if($selection.candidate){Get-ImageCandidateBinding $selection $SourceReceipt $FeatureCompositionReceipt $ExpectedFeatureCompositionSHA256 | Out-Null}
     Save 'iso-receipt.json' @{ path=$iso; sha256=(FileHash $iso); bytes=(Get-Item -LiteralPath $iso).Length; sourceCommit=$receipt.sourceCommit; helperBuild=$BuildName; architecture='arm64'; bootSHA256=$receipt.bootSHA256; installSHA256=$receipt.installSHA256; bootTested=$false; runtimeAccepted=$false; physicalTested=$false; privateDevelopmentOnly=$true; redistributionRightsEstablished=$false; publicDistributionAllowed=$false; stockSourceIsoSHA256=$bootSource.sourceIso.sha256; stockBcdSHA256=$bootSource.bootFiles.'efi/Microsoft/Boot/BCD'; stockEfiImageSHA256=$bootSource.bootFiles.'efi/Microsoft/Boot/efisys_noprompt.bin'; oscdimgSHA256=$bootSource.oscdimg.sha256; privateBootSourceSHA256=$bootConfigHash }
     Save 'Iso-result.json' @{ status='passed'; mediaBuildOnly=$true; bootTested=$false; runtimeAccepted=$false; physicalTested=$false; hostBootChanged=$false; installedToA=$false }
 } catch {
