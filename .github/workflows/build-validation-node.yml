@@ -90,7 +90,7 @@ jobs:
           $repo=$env:GITHUB_WORKSPACE
           $patch=Join-Path $repo 'patches/node-v26.10.0-validationos.patch'
           # Read raw committed bytes; a text pipeline or checkout can alter newlines.
-          $git=(Get-Command git -CommandType Application).Source
+          $git=(Get-Command git -CommandType Application|Select-Object -First 1).Source
           $patchBytes=Read-ExactPatchBlob $git $repo $env:GITHUB_SHA
           $patchLeaf=Get-Item -LiteralPath $patch -Force
           if($patchLeaf.PSIsContainer-or$patchLeaf.LinkType-or($patchLeaf.Attributes-band[IO.FileAttributes]::ReparsePoint)){throw 'The checked-out patch destination must be an ordinary file.'}
@@ -124,8 +124,8 @@ jobs:
           $sdk=Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10'
           $sdkFiles=@(('Include/'+$sdkVersion+'/shared/bcrypt.h');('Include/'+$sdkVersion+'/um/apiquery2.h');('Lib/'+$sdkVersion+'/um/arm64/bcrypt.lib');('Lib/'+$sdkVersion+'/um/arm64/OneCore_apiset.lib');('Lib/'+$sdkVersion+'/ucrt/arm64/ucrt.lib'))
           foreach($relative in $sdkFiles){if(-not[IO.File]::Exists((Join-Path $sdk $relative))){throw ('The actual Windows SDK26100 ARM64 header/library is missing: '+$relative)}}
-          $rustc=(Get-Command rustc -CommandType Application).Source
-          $rustup=(Get-Command rustup -CommandType Application).Source
+          $rustc=(Get-Command rustc -CommandType Application|Select-Object -First 1).Source
+          $rustup=(Get-Command rustup -CommandType Application|Select-Object -First 1).Source
           $rustText=Native $rustc @('--version')
           $match=[regex]::Match($rustText,'^rustc ([0-9]+\.[0-9]+\.[0-9]+)')
           if(-not$match.Success-or[version]$match.Groups[1].Value-lt[version]'1.86.0'){throw 'Rust1.86+ is required for enabled Temporal.'}
@@ -140,7 +140,7 @@ jobs:
             $targets=(Native $rustup @('target','list','--installed','--toolchain',$rustToolchain))-split'\r?\n'
           }
           if($targets-cnotcontains'aarch64-pc-windows-msvc'){throw 'Rust ARM64 target is unavailable.'}
-          $python=(Get-Command python -CommandType Application).Source
+          $python=(Get-Command python -CommandType Application|Select-Object -First 1).Source
           $pythonText=Native $python @('--version')
           $match=[regex]::Match($pythonText,'^Python ([0-9]+\.[0-9]+\.[0-9]+)')
           if(-not$match.Success-or[version]$match.Groups[1].Value-lt[version]'3.10.0'-or[version]$match.Groups[1].Value-ge[version]'4.0.0'){throw 'A supported installed Python3.10+ is required.'}
