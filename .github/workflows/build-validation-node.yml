@@ -69,8 +69,8 @@ jobs:
           if($vc.Count-ne1){throw 'Installed MSVC ARM64 and ATL files are required.'}
           $sdkVersion='10.0.26100.0'
           $sdk=Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10'
-          $sdkFiles=@(('Include/'+$sdkVersion+'/um/bcrypt.h');('Include/'+$sdkVersion+'/um/apiquery2.h');('Lib/'+$sdkVersion+'/um/arm64/bcrypt.lib');('Lib/'+$sdkVersion+'/um/arm64/OneCore_apiset.lib');('Lib/'+$sdkVersion+'/ucrt/arm64/ucrt.lib'))
-          foreach($relative in $sdkFiles){if(-not[IO.File]::Exists((Join-Path $sdk $relative))){throw 'The actual Windows SDK26100 ARM64 headers/libraries are required.'}}
+          $sdkFiles=@(('Include/'+$sdkVersion+'/shared/bcrypt.h');('Include/'+$sdkVersion+'/um/apiquery2.h');('Lib/'+$sdkVersion+'/um/arm64/bcrypt.lib');('Lib/'+$sdkVersion+'/um/arm64/OneCore_apiset.lib');('Lib/'+$sdkVersion+'/ucrt/arm64/ucrt.lib'))
+          foreach($relative in $sdkFiles){if(-not[IO.File]::Exists((Join-Path $sdk $relative))){throw ('The actual Windows SDK26100 ARM64 header/library is missing: '+$relative)}}
           $rustc=(Get-Command rustc -CommandType Application).Source
           $rustup=(Get-Command rustup -CommandType Application).Source
           $rustText=Native $rustc @('--version')
