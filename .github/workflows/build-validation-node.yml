@@ -30,12 +30,56 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           Set-StrictMode -Version Latest
-          function Native([string]$Exe,[string[]]$Arguments) {
-            $old=$ErrorActionPreference
-            try {$ErrorActionPreference='Continue';$output=@(& $Exe @Arguments 2>&1);$code=$LASTEXITCODE}
-            finally {$ErrorActionPreference=$old}
-            if($code-ne0){throw 'A required build-input command failed.'}
-            return ($output -join "`n")
+          function Phase([string]$Label) {Write-Host ('Preflight phase: '+$Label+' UTC='+[DateTime]::UtcNow.ToString('o'))}
+          function Read-PreflightProcess($Process,[int]$TimeoutMilliseconds) {
+            $clock=[Diagnostics.Stopwatch]::StartNew();$streams=@($Process.StandardOutput.BaseStream,$Process.StandardError.BaseStream)
+            $buffers=@([byte[]]::new(4096),[byte[]]::new(4096));$saved=@([IO.MemoryStream]::new(),[IO.MemoryStream]::new())
+            $done=@($false,$false);$failure=$null
+            try {
+              $tasks=@($streams[0].ReadAsync($buffers[0],0,4096),$streams[1].ReadAsync($buffers[1],0,4096))
+              while(-not($done[0]-and$done[1])) {
+                if($clock.ElapsedMilliseconds-ge$TimeoutMilliseconds){$failure='deadline';break}
+                for($at=0;$at-lt2;$at++){if(-not$done[$at]-and$tasks[$at].IsCompleted){$count=$tasks[$at].GetAwaiter().GetResult();if($count-eq0){$done[$at]=$true}else{if($saved[$at].Length+$count-gt1MB){$failure='stream cap';break};$saved[$at].Write($buffers[$at],0,$count);$tasks[$at]=$streams[$at].ReadAsync($buffers[$at],0,4096)}}}
+                if($failure){break};if(-not($done[0]-and$done[1])){[Threading.Thread]::Sleep(10)}
+              }
+              if(-not$failure){$remaining=$TimeoutMilliseconds-[int]$clock.ElapsedMilliseconds;if($remaining-le0-or-not$Process.WaitForExit($remaining)){$failure='process close deadline'}}
+              return [pscustomobject]@{stdout=$saved[0].ToArray();stderr=$saved[1].ToArray();failure=$failure;complete=(-not$failure);exitCode=$(if($failure){$null}else{$Process.ExitCode});elapsedMilliseconds=$clock.ElapsedMilliseconds}
+            }catch{return [pscustomobject]@{stdout=$saved[0].ToArray();stderr=$saved[1].ToArray();failure='capture exception';complete=$false;exitCode=$null;elapsedMilliseconds=$clock.ElapsedMilliseconds;errorType=$_.Exception.GetType().FullName}}
+            finally{$saved[0].Dispose();$saved[1].Dispose()}
+          }
+          function Native([string]$Exe,[string[]]$Arguments,[int]$TimeoutSeconds=120) {
+            $resolved=(Get-Command $Exe -CommandType Application|Select-Object -First 1).Source
+            $name=[IO.Path]::GetFileName($resolved);Write-Host ('Preflight native start: '+$name+' timeoutSeconds='+$TimeoutSeconds)
+            $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$resolved;$start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+            foreach($argument in $Arguments){$start.ArgumentList.Add($argument)}
+            $process=[Diagnostics.Process]::new();$process.StartInfo=$start;$started=$false
+            try {
+              if(-not$process.Start()){throw 'A fixed preflight process did not start.'};$started=$true
+              $capture=Read-PreflightProcess $process ($TimeoutSeconds*1000)
+              $encoding=[Text.UTF8Encoding]::new($false,$false);$stdout=$encoding.GetString($capture.stdout).TrimStart([char]0xFEFF);$stderr=$encoding.GetString($capture.stderr).TrimStart([char]0xFEFF)
+              Write-Host ('Preflight native end: '+$name+' complete='+$capture.complete+' exit='+$capture.exitCode+' elapsedMilliseconds='+$capture.elapsedMilliseconds+' stdoutBytes='+$capture.stdout.Length+' stderrBytes='+$capture.stderr.Length)
+              if(-not$capture.complete-or$capture.exitCode-ne0){if($stdout){Write-Host ('Captured preflight stdout: '+$stdout)};if($stderr){Write-Host ('Captured preflight stderr: '+$stderr)};throw ('A required preflight command failed: '+$name+' class='+$capture.failure+' exit='+$capture.exitCode)}
+              return ($stdout+$(if($stderr){"`n"+$stderr}else{''})).TrimEnd("`r","`n")
+            }finally{if($started-and-not$process.HasExited){Write-Host ('Terminating only owned preflight process tree: '+$name+' PID='+$process.Id);$process.Kill($true);if(-not$process.WaitForExit(5000)){throw 'The owned preflight process tree did not close after termination.'}};$process.Dispose()}
+          }
+          function Copy-BoundedDownloadStream([IO.Stream]$InputStream,[IO.Stream]$OutputStream,[long]$Maximum,[Threading.CancellationToken]$Token,[int]$TimeoutMilliseconds=180000) {
+            $clock=[Diagnostics.Stopwatch]::StartNew();$buffer=[byte[]]::new(65536);$total=0L
+            while($true){$left=$TimeoutMilliseconds-[int]$clock.ElapsedMilliseconds;if($left-le0){throw 'The fixed source download body exceeded its deadline.'};$read=$InputStream.ReadAsync($buffer,0,$buffer.Length,$Token);if(-not$read.Wait($left)){throw 'The fixed source download body exceeded its deadline.'};$count=$read.GetAwaiter().GetResult();if($count-eq0){break};if($total+$count-gt$Maximum){throw 'The fixed source download body exceeded its byte cap.'};$OutputStream.Write($buffer,0,$count);$total+=$count}
+            return $total
+          }
+          function Download-FixedNodeSource([string]$Archive) {
+            $handler=[Net.Http.HttpClientHandler]::new();$handler.AllowAutoRedirect=$false;$handler.UseDefaultCredentials=$false
+            $client=[Net.Http.HttpClient]::new($handler);$client.Timeout=[TimeSpan]::FromSeconds(180)
+            $cancel=[Threading.CancellationTokenSource]::new(180000);$response=$null;$input=$null;$output=$null;$clock=[Diagnostics.Stopwatch]::StartNew()
+            try {
+              $response=$client.GetAsync('https://nodejs.org/download/release/v26.10.0/node-v26.10.0.tar.xz',[Net.Http.HttpCompletionOption]::ResponseHeadersRead,$cancel.Token).GetAwaiter().GetResult()
+              if([int]$response.StatusCode-ne200){throw ('The fixed source download returned HTTP '+[int]$response.StatusCode)}
+              $input=$response.Content.ReadAsStreamAsync().GetAwaiter().GetResult();$output=[IO.File]::Open($Archive,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+              $left=180000-[int]$clock.ElapsedMilliseconds;if($left-le0){throw 'The fixed source download exceeded its total deadline.'}
+              $bytes=Copy-BoundedDownloadStream $input $output 62055788 $cancel.Token $left;$output.Flush($true)
+              Write-Host ('Source download complete: bytes='+$bytes+' elapsedMilliseconds='+$clock.ElapsedMilliseconds)
+              if($bytes-ne62055788){throw 'The fixed source download length differs.'}
+            }finally{$cancel.Cancel();if($output){$output.Dispose()};if($input){$input.Dispose()};if($response){$response.Dispose()};$client.Dispose();$handler.Dispose();$cancel.Dispose()}
           }
           function Hash([string]$File) {(Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash}
           function Patch-BlobArguments([string]$Repo,[string]$Commit) {
@@ -89,6 +133,7 @@ jobs:
           }
           $repo=$env:GITHUB_WORKSPACE
           $patch=Join-Path $repo 'patches/node-v26.10.0-validationos.patch'
+          Phase 'Raw committed patch start'
           # Read raw committed bytes; a text pipeline or checkout can alter newlines.
           $git=(Get-Command git -CommandType Application|Select-Object -First 1).Source
           $patchBytes=Read-ExactPatchBlob $git $repo $env:GITHUB_SHA
@@ -96,6 +141,8 @@ jobs:
           if($patchLeaf.PSIsContainer-or$patchLeaf.LinkType-or($patchLeaf.Attributes-band[IO.FileAttributes]::ReparsePoint)){throw 'The checked-out patch destination must be an ordinary file.'}
           [IO.File]::WriteAllBytes($patch,$patchBytes)
           if((Get-Item -LiteralPath $patch).Length-ne9940-or(Hash $patch)-cne'E7AC4A086B6AA359BD6A17FDD14878E7CAD074D1B828A18D15A96C41F3F1CBF6'){throw 'The exact reviewed seven-file patch differs.'}
+          Phase 'Raw committed patch verified'
+          Phase 'Tool discovery start'
           $manifestPath=Join-Path $repo 'patches/node-v26.10.0-validationos.json'
           if((Get-Item -LiteralPath $manifestPath).Length-gt65536){throw 'Build-input manifest exceeds its bound.'}
           $manifest=Get-Content -LiteralPath $manifestPath -Raw|ConvertFrom-Json
@@ -129,32 +176,42 @@ jobs:
           $rustText=Native $rustc @('--version')
           $match=[regex]::Match($rustText,'^rustc ([0-9]+\.[0-9]+\.[0-9]+)')
           if(-not$match.Success-or[version]$match.Groups[1].Value-lt[version]'1.86.0'){throw 'Rust1.86+ is required for enabled Temporal.'}
+          Phase 'Rust target verification start'
           $rustToolchain=(Native $rustup @('show','active-toolchain')).Split(' ')[0]
           if($rustToolchain-notmatch'^[A-Za-z0-9_.-]+$'){throw 'Unexpected active Rust toolchain spelling.'}
           $targets=(Native $rustup @('target','list','--installed','--toolchain',$rustToolchain))-split'\r?\n'
           $rustTargetAdded=$false
           if($targets-cnotcontains'aarch64-pc-windows-msvc'){
             # Only this standard-library target is acquired on the disposable CI worker.
-            $null=Native $rustup @('target','add','aarch64-pc-windows-msvc','--toolchain',$rustToolchain)
+            Phase 'Rust target acquisition start'
+            $null=Native $rustup @('target','add','aarch64-pc-windows-msvc','--toolchain',$rustToolchain) -TimeoutSeconds 600
+            Phase 'Rust target acquisition closed'
             $rustTargetAdded=$true
             $targets=(Native $rustup @('target','list','--installed','--toolchain',$rustToolchain))-split'\r?\n'
           }
           if($targets-cnotcontains'aarch64-pc-windows-msvc'){throw 'Rust ARM64 target is unavailable.'}
+          Phase 'Rust target verified'
           $python=(Get-Command python -CommandType Application|Select-Object -First 1).Source
           $pythonText=Native $python @('--version')
           $match=[regex]::Match($pythonText,'^Python ([0-9]+\.[0-9]+\.[0-9]+)')
           if(-not$match.Success-or[version]$match.Groups[1].Value-lt[version]'3.10.0'-or[version]$match.Groups[1].Value-ge[version]'4.0.0'){throw 'A supported installed Python3.10+ is required.'}
+          Phase 'Tool discovery complete'
           $work=Join-Path $env:RUNNER_TEMP ('validation-node-'+$env:GITHUB_RUN_ID+'-'+$env:GITHUB_RUN_ATTEMPT)
           if(Test-Path -LiteralPath $work){throw 'The build scope must be fresh.'}
           $null=New-Item -ItemType Directory -Path $work
           $artifact=Join-Path $work 'artifact';$null=New-Item -ItemType Directory -Path $artifact
           $archive=Join-Path $work 'node-v26.10.0.tar.xz'
-          Invoke-WebRequest -Uri 'https://nodejs.org/download/release/v26.10.0/node-v26.10.0.tar.xz' -OutFile $archive -MaximumRedirection 0 -TimeoutSec 180
+          Phase 'Source download start'
+          Download-FixedNodeSource $archive
           if((Get-Item -LiteralPath $archive).Length-ne62055788-or(Hash $archive)-cne'7B3A546D33CB7E15A43BDD7A57E0BE5D5FD5FFC553E6E4C120033E66F0BA20C5'){throw 'The official Node26.10 archive differs.'}
-          $null=Native tar @('-xf',$archive,'-C',$work)
+          Phase 'Source download verified'
+          Phase 'Source extraction start'
+          $null=Native tar @('-xf',$archive,'-C',$work) -TimeoutSeconds 1200
+          Phase 'Source extraction closed'
           $source=Join-Path $work 'node-v26.10.0'
           foreach($row in $manifest.modifiedFiles){$file=Join-Path $source $row.relative;if((Hash $file)-cne$row.beforeSHA256){throw 'An original patch input differs from the pinned source.'}}
           foreach($row in $manifest.unchangedInputs){if((Hash (Join-Path $source $row.relative))-cne$row.SHA256){throw 'An unchanged upstream build/license input differs.'}}
+          Phase 'Reviewed patch application start'
           $changed=Native git @('-C',$source,'-c','core.autocrlf=false','apply','--numstat',$patch)
           $paths=@($changed-split'\r?\n'|Where-Object{$_}|ForEach-Object{($_-split"`t")[2]})
           if(($paths-join'|')-cne($expected-join'|')){throw 'The patch would modify an unexpected file set.'}
@@ -162,6 +219,7 @@ jobs:
           $null=Native git @('-C',$source,'-c','core.autocrlf=false','apply',$patch)
           foreach($row in $manifest.modifiedFiles){$file=Join-Path $source $row.relative;if((Get-Item -LiteralPath $file).Length-ne$row.afterBytes-or(Hash $file)-cne$row.afterSHA256){throw 'A patched file differs from its exact reviewed bytes.'}}
           foreach($row in $manifest.unchangedInputs){if((Hash (Join-Path $source $row.relative))-cne$row.SHA256){throw 'Patch application changed an upstream build/license input.'}}
+          Phase 'Reviewed patch application verified'
           $toolchain=[ordered]@{visualStudioVersion=$instances[0].installationVersion;visualStudioPath=$vs;requiredComponents=$required;clangVersionOutput=$clangText;clangSHA256=(Hash $clang);msbuildVersion=[Diagnostics.FileVersionInfo]::GetVersionInfo($msbuild).FileVersion;msbuildSHA256=(Hash $msbuild);msvcVersion=$vc[0].Name;arm64CompilerSHA256=(Hash (Join-Path $vc[0].FullName 'bin/Hostx64/arm64/cl.exe'));sdkVersion=$sdkVersion;rustVersionOutput=$rustText;rustcSHA256=(Hash $rustc);rustToolchain=$rustToolchain;rustArm64TargetVerified=$true;rustArm64TargetAddedInDisposableWorker=$rustTargetAdded;pythonVersionOutput=$pythonText;imageVersion=$env:ImageVersion;runnerArchitecture=$env:PROCESSOR_ARCHITECTURE}
           $receipt=[ordered]@{version=1;kind='validationNodeCrossBuildInputs';repository=$env:GITHUB_REPOSITORY;workflowCommit=$env:GITHUB_SHA;runId=$env:GITHUB_RUN_ID;runAttempt=$env:GITHUB_RUN_ATTEMPT;tag=$manifest.tag;upstreamCommit=$manifest.upstreamCommit;sourceArchiveSHA256=(Hash $archive);sourceBytes=(Get-Item -LiteralPath $archive).Length;patchSHA256=(Hash $patch);manifestSHA256=(Hash $manifestPath);modifiedFiles=$manifest.modifiedFiles;unchangedInputs=$manifest.unchangedInputs;toolchain=$toolchain;command=@('release','arm64','vs2022','v8temporal');temporalEnabled=$true;independentReleaseSignatureVerified=$false;staticApiComplianceAccepted=$false;guestRuntimeAccepted=$false;installedBinaryChanged=$false;compiled=$false}
           $receipt|ConvertTo-Json -Depth 12|Set-Content -LiteralPath (Join-Path $artifact 'input-receipt.json') -Encoding utf8NoBOM
