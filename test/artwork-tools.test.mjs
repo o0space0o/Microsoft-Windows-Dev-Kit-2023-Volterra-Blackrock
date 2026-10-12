@@ -20,8 +20,8 @@ const evidence = (patch = {}) => ({ version: 1, kind: 'artwork', status: 'passed
   checks: names.map(file => ({ file, expectedSha256: approved[file], status: 'passed', actualSha256: approved[file], sizeBytes: '2000000', error: null })), ...patch });
 const info = (folder = false, size = 0, patch = {}) => ({ dev: 1n, ino: 2n, size: BigInt(size), mtimeNs: 3n, ctimeNs: 4n,
   isDirectory: () => folder, isFile: () => !folder, isSymbolicLink: () => false, ...patch });
-function fixtureFilesystem(bytes = Buffer.from('fixture artwork content')) {
-  const calls = [], handles = [], targets = names.map(file => path.join(root, 'design', 'approved-v1', file));
+function fixtureFilesystem(bytes = Buffer.from('fixture artwork content'), base = root) {
+  const calls = [], handles = [], targets = names.map(file => path.join(base, 'design', 'approved-v1', file));
   const filesystem = {
     realpath: async target => { calls.push(['realpath', target]); return target; },
     lstat: async (target, options) => { calls.push(['lstat', target, options]); return info(!targets.includes(target), bytes.length); },
@@ -39,6 +39,11 @@ function fixtureFilesystem(bytes = Buffer.from('fixture artwork content')) {
     }
   };
   return { filesystem, calls, handles, targets };
+}
+function assertFixedArtworkScope(fixture, base = root) {
+  const allowed = new Set([root, base, path.join(base, 'design'), path.join(base, 'design', 'approved-v1'), ...fixture.targets]);
+  assert.ok(fixture.calls.every(call => allowed.has(call[1])), 'Only the installed source directories and four fixed reference leaves may be read.');
+  assert.deepEqual(fixture.calls.filter(call => call[0] === 'open').map(call => call[1]), fixture.targets);
 }
 const checkBlocked = result => { assert.equal(result.status, 'blocked'); assert.deepEqual(result.checks, []); assert.equal(result.matchedCount, undefined); assert.match(artworkReport(result), /checks are blocked/); };
 class FakeCodex extends EventEmitter {
@@ -77,11 +82,22 @@ test('collection reads only the fixed files in bounded chunks through read-only 
   const result = await collectArtwork({ filesystem: fixture.filesystem });
   assert.equal(result.status, 'blocked'); assert.ok(result.checks.every(check => check.status === 'changed' && check.error === null));
   for (const check of result.checks) { assert.equal(check.actualSha256, createHash('sha256').update(bytes).digest('hex')); assert.equal(check.sizeBytes, String(bytes.length)); }
-  assert.deepEqual(fixture.calls.filter(call => call[0] === 'open').map(call => call[1]), fixture.targets);
+  assertFixedArtworkScope(fixture);
   assert.ok(fixture.calls.filter(call => call[0] === 'read').every(call => call[3] <= 65_536));
   assert.ok(fixture.handles.every(handle => handle.closed));
-  assert.ok(fixture.calls.every(call => !/visual-lock|private|build|auth\.json/.test(call[1])));
   assert.ok(fixture.calls.filter(call => call[0] === 'lstat' || call[0] === 'handle.stat').every(call => call[2].bigint));
+});
+
+test('fixed artwork reads remain scoped when the source is relocated beneath build or credential-like parent names', async () => {
+  const base = path.join(directory, 'build', 'source-snapshots', 'private', 'auth.json', 'source');
+  const bytes = Buffer.from('relocated artwork fixture'), fixture = fixtureFilesystem(bytes, base);
+  fixture.filesystem.realpath = async target => { fixture.calls.push(['realpath', target]); return target === root ? base : target; };
+  const result = await collectArtwork({ filesystem: fixture.filesystem });
+  assertFixedArtworkScope(fixture, base);
+  assert.equal(result.checks.length, 4);
+  assert.ok(result.checks.every(check => check.status === 'changed' && check.actualSha256 === createHash('sha256').update(bytes).digest('hex')));
+  assert.ok(fixture.handles.every(handle => handle.closed));
+  assert.ok(!fixture.calls.some(call => path.basename(call[1]) === 'visual-lock.json'));
 });
 
 test('short reads are accumulated exactly while premature EOF and unsupported read counts are blocked and closed', async () => {
