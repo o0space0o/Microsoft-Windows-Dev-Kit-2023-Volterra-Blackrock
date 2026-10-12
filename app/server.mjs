@@ -23,9 +23,12 @@ import { uptimeQuery, collectUptime, inspectUptime, uptimeReport } from './uptim
 import { driveQuery, collectDrives, inspectDrives, driveReport } from './drive-tools.mjs';
 import { processorQuery, collectProcessors, inspectProcessors, processorReport } from './processor-tools.mjs';
 import { resolutionQuery, collectResolution, inspectResolution, resolutionReport } from './dns-resolution-tools.mjs';
+import { dependencyQuery, collectDependencies, inspectDependencies, dependencyReport } from './service-dependency-tools.mjs';
+import { artworkQuery, collectArtwork, inspectArtwork, artworkReport } from './artwork-tools.mjs';
+import { tcpQuery, collectTcp, inspectTcp, tcpReport } from './tcp-tools.mjs';
 import { githubBrowserCommand } from '../scripts/Open-Browser.mjs';
 
-export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices, storageCollector = collectStorage, networkCollector = collectNetworking, browserOpener = openBrowser, fileCollector = collectFiles, logCollector = collectLogs, maintenanceCollector = collectMaintenance, processCollector = collectProcesses, dnsCollector = collectDns, memoryCollector = collectMemory, uptimeCollector = collectUptime, driveCollector = collectDrives, processorCollector = collectProcessors, resolutionCollector = collectResolution } = {}) {
+export async function createApplication({ port = Number(process.env.VOLTERRA_PORT || 43123), codex = new CodexBridge(), autostart = process.env.VOLTERRA_AUTOSTART === '1', repository, serviceCollector = collectServices, deviceCollector = collectDevices, storageCollector = collectStorage, networkCollector = collectNetworking, browserOpener = openBrowser, fileCollector = collectFiles, logCollector = collectLogs, maintenanceCollector = collectMaintenance, processCollector = collectProcesses, dnsCollector = collectDns, memoryCollector = collectMemory, uptimeCollector = collectUptime, driveCollector = collectDrives, processorCollector = collectProcessors, resolutionCollector = collectResolution, dependencyCollector = collectDependencies, artworkCollector = collectArtwork, tcpCollector = collectTcp } = {}) {
   const state = await readState();
   const defaultFolder = await fs.realpath(process.env.VOLTERRA_OS_ROOT || root);
   if (!state.selected || (process.env.VOLTERRA_OS_ROOT && state.selected !== defaultFolder)) {
@@ -48,13 +51,16 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
   const selected = () => state.selected && state.projects[state.selected];
   const inventoryTools = [
     { kind: 'services', query: serviceQuery, inspect: query => inspectServices(query.filter, serviceCollector), report: serviceReport, script: 'Get-ServiceInventory.ps1' },
+    { kind: 'service-dependencies', query: dependencyQuery, inspect: query => inspectDependencies(query.filter, dependencyCollector), report: dependencyReport, script: 'Get-ServiceDependencies.ps1' },
     { kind: 'devices', query: deviceQuery, inspect: query => inspectDevices(query.filter, deviceCollector), report: deviceReport, script: 'Get-DeviceInventory.ps1' },
     { kind: 'storage', query: storageQuery, inspect: () => inspectStorage(selected()?.path || defaultFolder, storageCollector), report: storageReport, notice: 'Reading filesystem capacity for the selected workspace.' },
     { kind: 'drives', query: driveQuery, inspect: query => inspectDrives(query.filter, driveCollector), report: driveReport, script: 'Get-DriveInventory.ps1' },
     { kind: 'networking', query: networkQuery, inspect: query => inspectNetworking(query.filter, networkCollector), report: networkReport, notice: 'Reading assigned interface addresses for this OS session.' },
+    { kind: 'tcp', query: tcpQuery, inspect: query => inspectTcp(query.endpoint, tcpCollector), report: tcpReport, notice: 'Initiating one TCP connection to the requested literal IP address and port, without application data.' },
     { kind: 'files', query: fileQuery, inspect: query => inspectFiles(selected()?.path || defaultFolder, query.filter, fileCollector), report: fileReport, notice: 'Reading metadata for the selected workspace root.' },
     { kind: 'logs', query: logQuery, inspect: query => inspectLogs(query.filter, logCollector), report: logReport, script: 'Get-LogInventory.ps1' },
     { kind: 'maintenance', query: maintenanceQuery, inspect: () => inspectMaintenance(maintenanceCollector), report: maintenanceReport, script: 'Get-MaintenanceStatus.ps1' },
+    { kind: 'artwork', query: artworkQuery, inspect: () => inspectArtwork(artworkCollector), report: artworkReport, notice: 'Reading the four installed approved reference files and comparing their SHA-256 hashes.' },
     { kind: 'processes', query: processQuery, inspect: query => inspectProcesses(query.filter, processCollector), report: processReport, script: 'Get-ProcessInventory.ps1' },
     { kind: 'dns', query: dnsQuery, inspect: query => inspectDns(query.filter, dnsCollector), report: dnsReport, notice: 'Reading DNS server configuration for the helper’s Node resolver.' },
     { kind: 'dns-resolution', query: resolutionQuery, inspect: query => inspectResolution(query.name, resolutionCollector), report: resolutionReport, notice: 'Sending bounded A and AAAA queries for the requested DNS name through a dedicated Node resolver.' },

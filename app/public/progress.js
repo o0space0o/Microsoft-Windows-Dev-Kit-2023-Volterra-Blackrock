@@ -3,13 +3,16 @@ export function describeProgress(state, connected = true) {
   if (state.interruptRequested && state.activeTurn) return { phase: 'stopping', title: 'Pausing Codex', detail: 'Waiting for the running job to confirm it has stopped. Progress is saved.', active: true };
   if (state.approvals?.length) return { phase: 'question', title: 'Codex needs your answer', detail: 'Reply in the chat below. Your work is saved while Codex waits.', active: false };
   if (state.systemTool?.kind === 'services') return { phase: 'checking', title: 'Reading Windows services', detail: 'Collecting live service status and startup modes for this OS session.', active: true };
+  if (state.systemTool?.kind === 'service-dependencies') return { phase: 'checking', title: 'Reading service dependencies', detail: 'Collecting reported required and dependent service names for this OS session.', active: true };
   if (state.systemTool?.kind === 'devices') return { phase: 'checking', title: 'Reading Windows devices', detail: 'Collecting reported device status and problem codes for this OS session.', active: true };
   if (state.systemTool?.kind === 'storage') return { phase: 'checking', title: 'Reading workspace storage', detail: 'Collecting live filesystem capacity for the selected workspace.', active: true };
   if (state.systemTool?.kind === 'drives') return { phase: 'checking', title: 'Reading Windows logical drives', detail: 'Collecting reported drive letters, types and capacity for this OS session.', active: true };
   if (state.systemTool?.kind === 'networking') return { phase: 'checking', title: 'Reading network addresses', detail: 'Collecting assigned interface addresses for this OS session.', active: true };
+  if (state.systemTool?.kind === 'tcp') return { phase: 'checking', title: 'Checking a TCP connection', detail: 'Attempting one connection to the requested literal IP address and port.', active: true };
   if (state.systemTool?.kind === 'files') return { phase: 'checking', title: 'Reading workspace files', detail: 'Collecting root entry names, types, sizes and modification times.', active: true };
   if (state.systemTool?.kind === 'logs') return { phase: 'checking', title: 'Reading Windows event logs', detail: 'Collecting bounded System and Application event metadata for this OS session.', active: true };
   if (state.systemTool?.kind === 'maintenance') return { phase: 'checking', title: 'Reading maintenance restart requirements', detail: 'Checking local Windows Update and pending file-operation signals.', active: true };
+  if (state.systemTool?.kind === 'artwork') return { phase: 'checking', title: 'Checking approved artwork', detail: 'Reading four installed reference files against their pinned SHA-256 hashes.', active: true };
   if (state.systemTool?.kind === 'processes') return { phase: 'checking', title: 'Reading Windows processes', detail: 'Collecting local process IDs, names and available memory readings.', active: true };
   if (state.systemTool?.kind === 'dns') return { phase: 'checking', title: 'Reading DNS resolver settings', detail: 'Collecting configured servers for the helper’s Node resolver.', active: true };
   if (state.systemTool?.kind === 'dns-resolution') return { phase: 'checking', title: 'Querying DNS addresses', detail: 'Querying A and AAAA records through the helper’s Node resolver.', active: true };
