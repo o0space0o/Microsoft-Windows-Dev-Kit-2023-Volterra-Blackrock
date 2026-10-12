@@ -10,8 +10,9 @@ param(
     [ValidatePattern('^[A-F0-9]{64}$')][string]$ExpectedApplicationOverlayAuthoritySHA256
 )
 $ErrorActionPreference='Stop'
+$featureRequested=([bool]$FeatureCompositionReceipt-or[bool]$ExpectedFeatureCompositionSHA256)
+if(-not$featureRequested){throw 'Legacy development-006 image creation is retired. A reviewed WPF composition is required.'}
 $workspace=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$base=Join-Path $workspace 'build\development-006'
 . (Join-Path $PSScriptRoot 'Image-Candidate.ps1')
 $selection=Get-ImageBuildSelection $workspace $BuildName $CandidateDirectory ($PSBoundParameters.ContainsKey('CandidateDirectory'))
 $build=$selection.build
@@ -24,9 +25,8 @@ function Save($value) {
         Save-ImageCandidateJson (Join-Path $build $name) $value $build
     }else{$value | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $build 'refresh-result.json') -Encoding utf8}
 }
-$featureRequested=([bool]$FeatureCompositionReceipt-or[bool]$ExpectedFeatureCompositionSHA256)
 if(([bool]$ApplicationOverlayAuthority-or[bool]$ExpectedApplicationOverlayAuthoritySHA256)-and-not$featureRequested){throw 'Application source authority requires the explicit measured feature branch.'}
-$basis='development-006'
+$basis='official predefined WPF composition'
 if($featureRequested){
     $candidateBinding=Get-ImageCandidateBinding $selection $SourceReceipt $FeatureCompositionReceipt $ExpectedFeatureCompositionSHA256 $ApplicationOverlayAuthority $ExpectedApplicationOverlayAuthoritySHA256
     if($null-eq$candidateBinding-or$candidateBinding.identity.version-ne2){throw 'Explicit reviewed collected v2 candidate required.'}
@@ -40,30 +40,6 @@ try {
         $verified=& (Join-Path $workspace 'private/tools/node.exe') (Join-Path $PSScriptRoot 'Prepare-ImageSource.mjs') --verify $candidateSource.path
         if($LASTEXITCODE-ne0-or($verified | ConvertFrom-Json).commit-cne$candidateSource.value.commit){throw 'Candidate checked source verification failed.'}
         $SourceReceipt=$candidateSource.path
-    }else{
-    $baseReceiptSHA256=(Get-FileHash -LiteralPath (Join-Path $base 'image-receipt.json')).Hash
-    $receipt=Get-Content -LiteralPath (Join-Path $base 'image-receipt.json') -Raw | ConvertFrom-Json
-    foreach ($kind in @('boot','install')) {
-        if ((Get-FileHash -LiteralPath (Join-Path $base ('output\'+$kind+'.wim'))).Hash -ne $receipt.($kind+'SHA256')) { throw 'The sealed base image hash changed.' }
-    }
-    if((Get-FileHash -LiteralPath (Join-Path $base 'image-receipt.json')).Hash-cne$baseReceiptSHA256){throw 'The sealed base image receipt changed.'}
-    if($selection.candidate){
-        $candidateSource=Get-ImageCandidateSource $SourceReceipt $workspace
-        $verified=& (Join-Path $workspace 'private/tools/node.exe') (Join-Path $PSScriptRoot 'Prepare-ImageSource.mjs') --verify $candidateSource.path
-        if($LASTEXITCODE-ne0-or($verified | ConvertFrom-Json).commit-cne$candidateSource.value.commit){throw 'Candidate checked source verification failed.'}
-        $SourceReceipt=$candidateSource.path
-        $candidateBinding=New-ImageCandidateBinding $selection $candidateSource $baseReceiptSHA256 $receipt.bootSHA256 $receipt.installSHA256
-        [IO.Directory]::CreateDirectory((Join-Path $build 'output')) | Out-Null
-        foreach($file in @('boot.wim','install.wim','result.json')){
-            $from=Join-Path $base ('output/'+$file);$expected=if($file-eq'boot.wim'){$receipt.bootSHA256}elseif($file-eq'install.wim'){$receipt.installSHA256}else{(Get-FileHash -LiteralPath $from).Hash}
-            Copy-ImageCandidateInput $from (Join-Path $build ('output/'+$file)) $expected $workspace $build
-        }
-        Copy-ImageCandidateInput (Join-Path $base 'image-receipt.json') (Join-Path $build 'image-receipt.json') $candidateBinding.identity.baseImageReceiptSHA256 $workspace $build
-    }else{
-        New-Item -ItemType Directory -Path (Join-Path $build 'output') | Out-Null
-        foreach ($file in @('boot.wim','install.wim','result.json')) { Copy-Item -LiteralPath (Join-Path $base ('output\'+$file)) -Destination (Join-Path $build 'output') }
-        Copy-Item -LiteralPath (Join-Path $base 'image-receipt.json') -Destination $build
-    }
     }
     Save @{status='running';base=$basis;build=$BuildName;phase='Refreshing original helper source only'}
     $nested=@{BuildName=$BuildName;SourceReceipt=$SourceReceipt}
