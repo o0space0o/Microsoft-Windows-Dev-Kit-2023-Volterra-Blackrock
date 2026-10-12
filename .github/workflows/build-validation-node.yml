@@ -209,6 +209,8 @@ jobs:
           $extractorBody=@'
           """Fixed Node release source extraction; no archive metadata restoration."""
           import hashlib
+          import contextlib
+          import ctypes
           import json
           import lzma
           import os
@@ -226,6 +228,82 @@ jobs:
 
           def identity(info):
               return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_nlink)
+
+          class NativeFileTime(ctypes.Structure):
+              _fields_ = [("low", ctypes.c_uint32), ("high", ctypes.c_uint32)]
+
+          class NativeFileInformation(ctypes.Structure):
+              _fields_ = [("attributes", ctypes.c_uint32), ("creation", NativeFileTime), ("access", NativeFileTime),
+                          ("write", NativeFileTime), ("volume", ctypes.c_uint32), ("sizeHigh", ctypes.c_uint32),
+                          ("sizeLow", ctypes.c_uint32), ("links", ctypes.c_uint32),
+                          ("indexHigh", ctypes.c_uint32), ("indexLow", ctypes.c_uint32)]
+
+          def native_record(info):
+              if info.attributes & (16 | 1024) or info.links != 1:
+                  raise ValueError("native file is directory reparse or multi-linked")
+              return {"attributes": int(info.attributes), "creationTime100ns": (int(info.creation.high) << 32) | int(info.creation.low),
+                      "writeTime100ns": (int(info.write.high) << 32) | int(info.write.low), "volumeSerial": int(info.volume),
+                      "size": (int(info.sizeHigh) << 32) | int(info.sizeLow), "links": int(info.links),
+                      "fileIndex": (int(info.indexHigh) << 32) | int(info.indexLow)}
+
+          class WindowsIdentityLease:
+              def __init__(self, stream, path, writable=False):
+                  import msvcrt
+                  if os.name != "nt" or ctypes.sizeof(NativeFileInformation) != 52:
+                      raise ValueError("exact Windows file information ABI required")
+                  self.api = ctypes.WinDLL("kernel32.dll", use_last_error=True, winmode=0x800)
+                  self.api.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                                                  ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+                  self.api.CreateFileW.restype = ctypes.c_void_p
+                  self.api.GetFileInformationByHandle.argtypes = [ctypes.c_void_p, ctypes.POINTER(NativeFileInformation)]
+                  self.api.GetFileInformationByHandle.restype = ctypes.c_int32
+                  self.api.CloseHandle.argtypes = [ctypes.c_void_p]
+                  self.api.CloseHandle.restype = ctypes.c_int32
+                  self.borrowed = msvcrt.get_osfhandle(stream.fileno())
+                  if self.borrowed == -1:
+                      raise ValueError("borrowed source handle is invalid")
+                  full = os.path.abspath(path)
+                  if not re.fullmatch(r"[A-Za-z]:\\.*", full) or os.path.normpath(full) != full:
+                      raise ValueError("exact ordinary Windows drive path required")
+                  ordinary(path, False)
+                  self.named = self.api.CreateFileW("\\\\?\\" + full, 0x81, 3 if writable else 1, None, 3, 0x200000, None)
+                  if self.named in (None, ctypes.c_void_p(-1).value):
+                      raise OSError(ctypes.get_last_error(), "named file metadata handle refused")
+                  try:
+                      self.before = self.compare()
+                  except BaseException:
+                      self.close()
+                      raise
+
+              def info(self, handle):
+                  value = NativeFileInformation()
+                  if not self.api.GetFileInformationByHandle(handle, ctypes.byref(value)):
+                      raise OSError(ctypes.get_last_error(), "native file information refused")
+                  return native_record(value)
+
+              def compare(self):
+                  held, named = self.info(self.borrowed), self.info(self.named)
+                  if held != named:
+                      raise ValueError("native held and named file identities differ")
+                  return held
+
+              def verify(self, size):
+                  value = self.compare()
+                  if value != self.before or value["size"] != size:
+                      raise ValueError("native file metadata changed")
+                  return value
+
+              def close(self):
+                  if self.named is not None:
+                      handle, self.named = self.named, None
+                      if not self.api.CloseHandle(handle):
+                          raise OSError(ctypes.get_last_error(), "named metadata handle close refused")
+
+              def __enter__(self):
+                  return self
+
+              def __exit__(self, kind, value, traceback):
+                  self.close()
 
           def ordinary(path, directory):
               info = os.lstat(path)
@@ -270,8 +348,10 @@ jobs:
                   raise ValueError("invalid member size")
               return parts
 
-          def extract_stream(stream, destination, expected, progress=None):
+          def extract_stream(stream, destination, expected, progress=None, archive_lease=None, lease_factory=None):
               expected_size, expected_sha, expected_files, expected_dirs, expected_bytes = expected
+              if lease_factory is None and os.name == "nt":
+                  lease_factory = WindowsIdentityLease
               before = os.fstat(stream.fileno())
               if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size != expected_size or digest(stream) != expected_sha:
                   raise ValueError("fixed source archive differs")
@@ -346,12 +426,17 @@ jobs:
                           if content.read(1):
                               raise ValueError("source member exceeds declared size")
                           output.flush()
-                          if digest(output) != file_hash.hexdigest().upper():
-                              raise ValueError("created source bytes differ from archive member")
-                          held = os.fstat(output.fileno())
-                          named = ordinary(target, False)
-                          if held.st_size != member.size or identity(held) != identity(named):
-                              raise ValueError("created source leaf identity differs")
+                          with lease_factory(output, target, True) if lease_factory else contextlib.nullcontext() as leaf_lease:
+                              if digest(output) != file_hash.hexdigest().upper():
+                                  raise ValueError("created source bytes differ from archive member")
+                              held = os.fstat(output.fileno())
+                              named = ordinary(target, False)
+                              if held.st_size != member.size:
+                                  raise ValueError("created source leaf size differs")
+                              if leaf_lease:
+                                  leaf_lease.verify(member.size)
+                              elif identity(held) != identity(named):
+                                  raise ValueError("created source leaf identity differs")
                       parents(relative[:-1])
                       encoded = name.encode("utf-8")
                       manifest.update(len(encoded).to_bytes(4, "little") + encoded + member.size.to_bytes(8, "little") + file_hash.digest())
@@ -361,6 +446,8 @@ jobs:
                   raise ValueError("complete source closure differs")
               if identity(before) != identity(os.fstat(stream.fileno())) or digest(stream) != expected_sha:
                   raise ValueError("held source archive changed")
+              if archive_lease:
+                  archive_lease.verify(expected_size)
               return {"source": str(root), "files": files, "directories": len(directory_members), "bytes": total,
                       "sourceManifestSHA256": manifest.hexdigest().upper(), "sourceArchiveSHA256": expected_sha,
                       "archiveMetadataRestored": False, "sourceBytesStreamedExactly": True, "allCreatedFilesReadBack": True}
@@ -373,7 +460,7 @@ jobs:
                   result["modules"][label] = {"path": os.path.abspath(file), "SHA256": value}
               return result
 
-          def main(args):
+          def main(args, lease_factory=None):
               if len(args) != 2 or any(not os.path.isabs(arg) or os.path.normpath(arg) != arg for arg in args):
                   raise ValueError("exact archive and CI directory arguments required")
               archive_path, destination = map(Path, args)
@@ -395,11 +482,18 @@ jobs:
                   with open(archive_path, "rb") as stream:
                       opened = os.fstat(stream.fileno())
                       result["archiveHandleStat"] = dict(zip(("device", "inode", "size", "mtimeNs", "ctimeNs", "links"), identity(opened)))
-                      if identity(named) != identity(opened):
-                          raise ValueError("archive identity changed before opening")
-                      result.update(extract_stream(stream, destination, EXPECTED, lambda count, files, size: print("Node source extraction progress: members=%d files=%d bytes=%d" % (count, files, size), flush=True)))
-                      if identity(named) != identity(ordinary(archive_path, False)):
-                          raise ValueError("named source archive changed")
+                      selected_lease = lease_factory or (WindowsIdentityLease if os.name == "nt" else None)
+                      with selected_lease(stream, archive_path, False) if selected_lease else contextlib.nullcontext() as archive_lease:
+                          if archive_lease:
+                              result["archiveNativeBefore"] = archive_lease.verify(EXPECTED[0])
+                          elif identity(named) != identity(opened):
+                              raise ValueError("archive identity changed before opening")
+                          result.update(extract_stream(stream, destination, EXPECTED, lambda count, files, size: print("Node source extraction progress: members=%d files=%d bytes=%d" % (count, files, size), flush=True), archive_lease, selected_lease))
+                          if identity(named) != identity(ordinary(archive_path, False)):
+                              raise ValueError("named source archive changed")
+                          if archive_lease:
+                              result["archiveNativeAfter"] = archive_lease.verify(EXPECTED[0])
+                              result["windowsSameApiHandleIdentityVerified"] = True
                   result["status"] = "source-extracted-awaiting-reviewed-patch"
                   code = 0
               except Exception as error:
@@ -424,11 +518,11 @@ jobs:
           $extractorBytes=[Text.UTF8Encoding]::new($false).GetBytes($extractorBody.Replace("`r`n","`n")+"`n")
           $extractorStream=[IO.File]::Open($extractorFile,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
           try{$extractorStream.Write($extractorBytes,0,$extractorBytes.Length)}finally{$extractorStream.Dispose()}
-          if((Hash $extractorFile)-cne'9A390AEEFCDB62612438EF7299D97BF5A31F4EABFCE93682F617FF8FE7AC7454'){throw 'The embedded reviewed Python extractor differs.'}
+          if((Hash $extractorFile)-cne'AE622BF672489E0FA4D12B4FD30D4FE36A218E2FCDA9FB54B1E099D85388AC66'){throw 'The embedded reviewed Python extractor differs.'}
           Write-Host ('Selected extraction Python: path='+$python+' SHA256='+(Hash $python)+' version='+$pythonText)
           $extractionText=Native $python @('-I','-B',$extractorFile,$archive,$work) -TimeoutSeconds 1200
           $extraction=($extractionText-split'\r?\n'|Select-Object -Last 1)|ConvertFrom-Json
-          if($extraction.version-ne1-or$extraction.kind-cne'validationNodePythonSourceExtraction'-or$extraction.status-cne'source-extracted-awaiting-reviewed-patch'-or$extraction.source-cne(Join-Path $work 'node-v26.10.0')-or$extraction.files-ne37977-or$extraction.directories-ne4205-or$extraction.bytes-ne674699160-or$extraction.sourceArchiveSHA256-cne'7B3A546D33CB7E15A43BDD7A57E0BE5D5FD5FFC553E6E4C120033E66F0BA20C5'-or$extraction.archiveMetadataRestored-ne$false-or$extraction.allCreatedFilesReadBack-ne$true-or$extraction.sourceBytesStreamedExactly-ne$true-or$extraction.compiled-ne$false){throw 'The exact streamed source extraction proof differs.'}
+          if($extraction.version-ne1-or$extraction.kind-cne'validationNodePythonSourceExtraction'-or$extraction.status-cne'source-extracted-awaiting-reviewed-patch'-or$extraction.source-cne(Join-Path $work 'node-v26.10.0')-or$extraction.files-ne37977-or$extraction.directories-ne4205-or$extraction.bytes-ne674699160-or$extraction.sourceArchiveSHA256-cne'7B3A546D33CB7E15A43BDD7A57E0BE5D5FD5FFC553E6E4C120033E66F0BA20C5'-or$extraction.archiveMetadataRestored-ne$false-or$extraction.allCreatedFilesReadBack-ne$true-or$extraction.sourceBytesStreamedExactly-ne$true-or$extraction.compiled-ne$false-or$extraction.windowsSameApiHandleIdentityVerified-ne$true){throw 'The exact streamed source extraction proof differs.'}
           Phase 'Source extraction closed'
           $source=Join-Path $work 'node-v26.10.0'
           foreach($row in $manifest.modifiedFiles){$file=Join-Path $source $row.relative;if((Hash $file)-cne$row.beforeSHA256){throw 'An original patch input differs from the pinned source.'}}
