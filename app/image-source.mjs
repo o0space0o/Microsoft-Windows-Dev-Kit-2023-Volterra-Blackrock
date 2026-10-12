@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { allowedSource, validateSource, hash } from './source-policy.mjs';
+import { allowedSource, isBuildAutomationSource, validateSource, hash } from './source-policy.mjs';
 import { validateOfflineImageMount } from './image-mount.mjs';
 
 const repository = 'o0space0o/Microsoft-Windows-Dev-Kit-2023-Volterra-Blackrock';
@@ -12,7 +12,7 @@ function committedFiles(records) {
     const match = /^(100644|100755) blob [a-f0-9]{40}\t(.+)$/.exec(record);
     if (!match || !allowedSource(match[2])) throw new Error('The source commit contains an excluded file or link.');
     return match[2];
-  });
+  }).filter(file => !isBuildAutomationSource(file));
 }
 async function checkSnapshot(source, owned, git, execute) {
   await execute(process.execPath, [path.join(source, 'scripts', 'Check-Source.mjs'), source], {

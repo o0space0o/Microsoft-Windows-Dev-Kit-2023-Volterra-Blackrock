@@ -1,0 +1,322 @@
+diff --git a/deps/uv/src/win/util.c b/deps/uv/src/win/util.c
+--- a/deps/uv/src/win/util.c
++++ b/deps/uv/src/win/util.c
+@@ -40,6 +40,7 @@
+ #include <windows.h>
+ /* clang-format on */
+ #include <userenv.h>
++#include <bcrypt.h>
+ #include <math.h>
+ 
+ /*
+@@ -62,9 +63,6 @@
+ # define UNLEN 256
+ #endif
+ 
+-
+-/* A RtlGenRandom() by any other name... */
+-extern BOOLEAN NTAPI SystemFunction036(PVOID Buffer, ULONG BufferLength);
+ 
+ /* Cached copy of the process title, plus a mutex guarding it. */
+ static char *process_title;
+@@ -1743,13 +1741,19 @@
+ }
+ 
+ int uv__random_winrandom(void* buf, size_t buflen) {
++  NTSTATUS status;
++
+   if (buflen == 0)
+     return 0;
+ 
+-  if (pProcessPrng != NULL && pProcessPrng(buf, buflen))
+-    return 0;
+-
+-  if (SystemFunction036(buf, buflen) == FALSE)
++  if (buflen > ULONG_MAX)
++    return UV_E2BIG;
++
++  status = BCryptGenRandom(NULL,
++                           (PUCHAR) buf,
++                           (ULONG) buflen,
++                           BCRYPT_USE_SYSTEM_PREFERRED_RNG);
++  if (status != 0)
+     return UV_EIO;
+ 
+   return 0;
+diff --git a/deps/uv/src/win/process.c b/deps/uv/src/win/process.c
+--- a/deps/uv/src/win/process.c
++++ b/deps/uv/src/win/process.c
+@@ -33,6 +33,7 @@
+ #include "req-inl.h"
+ #include <dbghelp.h>
+ #include <shlobj.h>
++#include <apiquery2.h>
+ #include <psapi.h>     /* GetModuleBaseNameW */
+ 
+ 
+@@ -1165,6 +1166,54 @@
+ }
+ 
+ 
++/* The WER fallback is optional on composed Windows editions. Query before
++ * resolving it so the loader does not require a static shell-folder import. */
++static int uv__get_localappdata(WCHAR** localappdata) {
++  static const GUID FOLDERID_LocalAppData_libuv = {
++    0xf1b32785, 0x6fba, 0x4fcf,
++        {0x9d, 0x55, 0x7b, 0x8e, 0x7f, 0x15, 0x70, 0x91}
++  };
++  HMODULE shell_module;
++  HRESULT result;
++  union {
++    FARPROC proc;
++    HRESULT (WINAPI *get_known_folder_path)(REFKNOWNFOLDERID,
++                                           DWORD,
++                                           HANDLE,
++                                           PWSTR*);
++  } u;
++
++  *localappdata = NULL;
++  if (!IsApiSetImplemented("ext-ms-win-shell32-shellfolders-l1-1-0"))
++    return UV_ENOSYS;
++
++  shell_module = LoadLibraryExW(L"shell32.dll",
++                                 NULL,
++                                 LOAD_LIBRARY_SEARCH_SYSTEM32);
++  if (shell_module == NULL)
++    return UV_ENOSYS;
++
++  u.proc = GetProcAddress(shell_module, "SHGetKnownFolderPath");
++  if (u.proc == NULL) {
++    FreeLibrary(shell_module);
++    return UV_ENOSYS;
++  }
++
++  result = u.get_known_folder_path(&FOLDERID_LocalAppData_libuv,
++                                   0,
++                                   NULL,
++                                   localappdata);
++  FreeLibrary(shell_module);
++  if (FAILED(result) || *localappdata == NULL) {
++    CoTaskMemFree(*localappdata);
++    *localappdata = NULL;
++    return UV_EIO;
++  }
++
++  return 0;
++}
++
++
+ static int uv__kill(HANDLE process_handle, int signum) {
+   if (signum < 0 || signum >= NSIG) {
+     return UV_EINVAL;
+@@ -1207,24 +1256,24 @@
+                          (PVOID) dump_folder,
+                          &dump_folder_len);
+       if (ret != ERROR_SUCCESS) {
+-        /* Workaround for missing uuid.dll on MinGW. */
+-        static const GUID FOLDERID_LocalAppData_libuv = {
+-          0xf1b32785, 0x6fba, 0x4fcf,
+-              {0x9d, 0x55, 0x7b, 0x8e, 0x7f, 0x15, 0x70, 0x91}
+-        };
+-
+         /* Default value for `dump_folder` is `%LOCALAPPDATA%\CrashDumps`. */
+         WCHAR* localappdata;
+-        SHGetKnownFolderPath(&FOLDERID_LocalAppData_libuv,
+-                             0,
+-                             NULL,
+-                             &localappdata);
+-        _snwprintf_s(dump_folder,
+-                     ARRAY_SIZE(dump_folder),
+-                     _TRUNCATE,
+-                     L"%ls\\CrashDumps",
+-                     localappdata);
++        int length;
++
++        if (uv__get_localappdata(&localappdata) != 0) {
++          RegCloseKey(registry_key);
++          goto skip_dump;
++        }
++        length = _snwprintf_s(dump_folder,
++                              ARRAY_SIZE(dump_folder),
++                              _TRUNCATE,
++                              L"%ls\\CrashDumps",
++                              localappdata);
+         CoTaskMemFree(localappdata);
++        if (length < 0) {
++          RegCloseKey(registry_key);
++          goto skip_dump;
++        }
+       }
+       RegCloseKey(registry_key);
+ 
+@@ -1291,6 +1340,7 @@
+     }
+   }
+ 
++skip_dump:
+   switch (signum) {
+     case SIGQUIT:
+     case SIGTERM:
+diff --git a/deps/uv/src/win/winapi.c b/deps/uv/src/win/winapi.c
+--- a/deps/uv/src/win/winapi.c
++++ b/deps/uv/src/win/winapi.c
+@@ -39,9 +39,6 @@
+ /* Powrprof.dll function pointer */
+ sPowerRegisterSuspendResumeNotification pPowerRegisterSuspendResumeNotification;
+ 
+-/* bcryptprimitives.dll function pointer */
+-sProcessPrng pProcessPrng;
+-
+ /* User32.dll function pointer */
+ sSetWinEventHook pSetWinEventHook;
+ 
+@@ -56,7 +53,6 @@
+   HMODULE powrprof_module;
+   HMODULE user32_module;
+   HMODULE ws2_32_module;
+-  HMODULE bcryptprimitives_module;
+   HMODULE api_win_core_file_module;
+ 
+   union {
+@@ -71,7 +67,6 @@
+     sNtQuerySystemInformation pNtQuerySystemInformation;
+     sNtQueryInformationProcess pNtQueryInformationProcess;
+     sPowerRegisterSuspendResumeNotification pPowerRegisterSuspendResumeNotification;
+-    sProcessPrng pProcessPrng;
+     sSetWinEventHook pSetWinEventHook;
+     uv_sGetHostNameW pGetHostNameW;
+     sGetFileInformationByName pGetFileInformationByName;
+@@ -143,14 +138,6 @@
+         u.pPowerRegisterSuspendResumeNotification;
+   }
+ 
+-  bcryptprimitives_module = LoadLibraryExA("bcryptprimitives.dll",
+-                                           NULL,
+-                                           LOAD_LIBRARY_SEARCH_SYSTEM32);
+-  if (bcryptprimitives_module != NULL) {
+-    u.proc = GetProcAddress(bcryptprimitives_module, "ProcessPrng");
+-    pProcessPrng = u.pProcessPrng;
+-  }
+-
+   user32_module = GetModuleHandleW(L"user32.dll");
+   if (user32_module != NULL) {
+     u.proc = GetProcAddress(user32_module, "SetWinEventHook");
+diff --git a/deps/uv/src/win/winapi.h b/deps/uv/src/win/winapi.h
+--- a/deps/uv/src/win/winapi.h
++++ b/deps/uv/src/win/winapi.h
+@@ -4758,8 +4758,6 @@
+                HANDLE        Recipient,
+                _PHPOWERNOTIFY RegistrationHandle);
+ 
+-typedef BOOL (WINAPI *sProcessPrng)(/*_Out_*/PBYTE pbData, SIZE_T cbData);
+-
+ /* from Winuser.h */
+ typedef VOID (CALLBACK* WINEVENTPROC)
+              (HWINEVENTHOOK hWinEventHook,
+@@ -4824,9 +4822,6 @@
+ /* Powrprof.dll function pointer */
+ extern sPowerRegisterSuspendResumeNotification pPowerRegisterSuspendResumeNotification;
+ 
+-/* bcryptprimitives.dll function pointer */
+-extern sProcessPrng pProcessPrng;
+-
+ /* User32.dll function pointer */
+ extern sSetWinEventHook pSetWinEventHook;
+ 
+diff --git a/deps/uv/uv.gyp b/deps/uv/uv.gyp
+--- a/deps/uv/uv.gyp
++++ b/deps/uv/uv.gyp
+@@ -203,6 +203,8 @@
+           'link_settings': {
+             'libraries': [
+               '-ladvapi32',
++              '-lbcrypt',
++              '-lOneCore_apiset',
+               '-ldbghelp',
+               '-lole32',
+               '-liphlpapi',
+diff --git a/deps/cares/src/lib/util/ares_rand.c b/deps/cares/src/lib/util/ares_rand.c
+--- a/deps/cares/src/lib/util/ares_rand.c
++++ b/deps/cares/src/lib/util/ares_rand.c
+@@ -27,6 +27,14 @@
+ #include "ares_private.h"
+ #include <stdlib.h>
+ 
++#ifdef _WIN32
++#  include <limits.h>
++#  include <bcrypt.h>
++#  ifdef _MSC_VER
++#    pragma comment(lib, "bcrypt")
++#  endif
++#endif
++
+ /* Older MacOS versions require including AvailabilityMacros.h before
+  * sys/random.h */
+ #ifdef HAVE_AVAILABILITYMACROS_H
+@@ -39,7 +47,7 @@
+ 
+ 
+ typedef enum {
+-  ARES_RAND_OS   = 1 << 0, /* OS-provided such as RtlGenRandom or arc4random */
++  ARES_RAND_OS   = 1 << 0, /* OS-provided such as BCryptGenRandom or arc4random */
+   ARES_RAND_FILE = 1 << 1, /* OS file-backed random number generator */
+   ARES_RAND_RC4  = 1 << 2  /* Internal RC4 based PRNG */
+ } ares_rand_backend;
+@@ -180,16 +188,22 @@
+   size_t        cache_remaining;
+ };
+ 
+-/* Define RtlGenRandom = SystemFunction036.  This is in advapi32.dll.  There is
+- * no need to dynamically load this, other software used widely does not.
+- * http://blogs.msdn.com/michael_howard/archive/2005/01/14/353379.aspx
+- * https://docs.microsoft.com/en-us/windows/win32/api/ntsecapi/nf-ntsecapi-rtlgenrandom
+- */
+ #ifdef _WIN32
+-BOOLEAN WINAPI SystemFunction036(PVOID RandomBuffer, ULONG RandomBufferLength);
+-#  ifndef RtlGenRandom
+-#    define RtlGenRandom(a, b) SystemFunction036(a, b)
+-#  endif
++/* Match the Windows ULONG API width without truncating a size_t request. */
++static ares_bool_t ares_rand_windows(unsigned char *buf, size_t len)
++{
++  while (len != 0) {
++    ULONG count = len > ULONG_MAX ? ULONG_MAX : (ULONG)len;
++    NTSTATUS status = BCryptGenRandom(NULL, (PUCHAR)buf, count,
++                                     BCRYPT_USE_SYSTEM_PREFERRED_RNG);
++    if (status != 0) {
++      return ARES_FALSE;
++    }
++    buf += count;
++    len -= count;
++  }
++  return ARES_TRUE;
++}
+ #endif
+ 
+ 
+@@ -296,8 +310,12 @@
+     switch (state->type) {
+       case ARES_RAND_OS:
+ #ifdef _WIN32
+-        RtlGenRandom(buf, (ULONG)len);
+-        return;
++        if (ares_rand_windows(buf, len)) {
++          return;
++        }
++        /* Keep the existing backend-recovery policy on OS RNG failure. */
++        state->bad_backends |= ARES_RAND_OS;
++        break;
+ #elif defined(HAVE_ARC4RANDOM_BUF)
+         arc4random_buf(buf, len);
+         return;
+diff --git a/deps/cares/cares.gyp b/deps/cares/cares.gyp
+--- a/deps/cares/cares.gyp
++++ b/deps/cares/cares.gyp
+@@ -199,6 +199,7 @@
+           'include_dirs': [ 'config/win32' ],
+           'libraries': [
+             '-lws2_32.lib',
++            '-lbcrypt.lib',
+             '-liphlpapi.lib'
+           ],
+         }, {

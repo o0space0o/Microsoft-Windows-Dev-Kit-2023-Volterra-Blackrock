@@ -4,6 +4,9 @@ import { createHash } from 'node:crypto';
 
 // A public source checkpoint never includes the Windows tree, vendor binaries or credentials.
 const roots = new Set(['AGENTS.md', 'PROJECT_BRIEF.md', 'README.md', 'package.json', 'automation.json', '.gitignore']);
+// These optional delivery inputs are public, but are not OS application payload.
+const buildAutomation = new Set(['.github/workflows/build-validation-node.yml', 'patches/node-v26.10.0-validationos.patch', 'patches/node-v26.10.0-validationos.json', 'patches/README.md']);
+export const isBuildAutomationSource = file => buildAutomation.has(file);
 export const approved = Object.freeze({
   'desktop.png': '6db4c93d32c30b60965af271617a2587f432d607792e75c6d4f4604a19582b96',
   'system.png': 'c9fb03b6af4c4ebfa34b341dc61b14d65c99042f2f82d4eaa693fa383f962a85',
@@ -14,6 +17,7 @@ export const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 export function allowedSource(file) {
   if (typeof file !== 'string' || file.includes('\\') || file.includes(':') || file.startsWith('/') || file.split('/').some(p => !p || p === '.' || p === '..')) return false;
   if (roots.has(file)) return true;
+  if (isBuildAutomationSource(file)) return true;
   if (file === 'scripts/Probe-WindowsFacts.cs' || file === 'scripts/Private-WindowsState.cs') return true;
   if (/^design\/[\w/-]+\.png$/.test(file)) return true;
   return /^(app|scripts|test|image|design)\/[\w./-]+\.(mjs|js|json|ps1|cmd|html|css|md|txt)$/.test(file)

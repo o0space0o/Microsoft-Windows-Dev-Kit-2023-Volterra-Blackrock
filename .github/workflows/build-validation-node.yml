@@ -1,0 +1,178 @@
+name: Build Validation OS Node
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validation-node-arm64
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Cross-compile Node for ARM64
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-2022
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out reviewed build inputs
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify source, patch and installed toolchain
+        run: |
+          $ErrorActionPreference='Stop'
+          Set-StrictMode -Version Latest
+          function Native([string]$Exe,[string[]]$Arguments) {
+            $old=$ErrorActionPreference
+            try {$ErrorActionPreference='Continue';$output=@(& $Exe @Arguments 2>&1);$code=$LASTEXITCODE}
+            finally {$ErrorActionPreference=$old}
+            if($code-ne0){throw 'A required build-input command failed.'}
+            return ($output -join "`n")
+          }
+          function Hash([string]$File) {(Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash}
+          $repo=$env:GITHUB_WORKSPACE
+          $patch=Join-Path $repo 'patches/node-v26.10.0-validationos.patch'
+          # Use the committed blob without Git for Windows line-ending conversion.
+          $null=Native git @('-C',$repo,'-c','core.autocrlf=false','checkout-index','--force','--','patches/node-v26.10.0-validationos.patch')
+          if((Get-Item -LiteralPath $patch).Length-ne9940-or(Hash $patch)-cne'E7AC4A086B6AA359BD6A17FDD14878E7CAD074D1B828A18D15A96C41F3F1CBF6'){throw 'The exact reviewed seven-file patch differs.'}
+          $manifestPath=Join-Path $repo 'patches/node-v26.10.0-validationos.json'
+          if((Get-Item -LiteralPath $manifestPath).Length-gt65536){throw 'Build-input manifest exceeds its bound.'}
+          $manifest=Get-Content -LiteralPath $manifestPath -Raw|ConvertFrom-Json
+          if($manifest.version-ne1-or$manifest.kind-cne'reviewedNodeValidationOsBuildInputs'-or$manifest.tag-cne'v26.10.0'-or$manifest.upstreamCommit-cne'151845ab90d3926ceb36eedf1eade09619c3adc9'-or$manifest.sourceSHA256-cne'7B3A546D33CB7E15A43BDD7A57E0BE5D5FD5FFC553E6E4C120033E66F0BA20C5'-or$manifest.sourceBytes-ne62055788-or$manifest.patchSHA256-cne'E7AC4A086B6AA359BD6A17FDD14878E7CAD074D1B828A18D15A96C41F3F1CBF6'-or@($manifest.modifiedFiles).Count-ne7){throw 'The fixed upstream and patch manifest differ.'}
+          $expected=@('deps/uv/src/win/util.c','deps/uv/src/win/process.c','deps/uv/src/win/winapi.c','deps/uv/src/win/winapi.h','deps/uv/uv.gyp','deps/cares/src/lib/util/ares_rand.c','deps/cares/cares.gyp')
+          if((@($manifest.modifiedFiles.relative)-join'|')-cne($expected-join'|')){throw 'The exact seven patch paths differ.'}
+          foreach($row in $manifest.modifiedFiles){if($row.beforeSHA256-cnotmatch'^[A-F0-9]{64}$'-or$row.afterSHA256-cnotmatch'^[A-F0-9]{64}$'-or$row.afterBytes-lt1){throw 'Patch file hashes or byte bounds differ.'}}
+          if($env:PROCESSOR_ARCHITECTURE-cne'AMD64'){throw 'The supported x64 cross-build host is required.'}
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $required=@('Microsoft.VisualStudio.Component.VC.Tools.ARM64','Microsoft.VisualStudio.Component.VC.ATL.ARM64','Microsoft.VisualStudio.Component.VC.Llvm.Clang','Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset','Microsoft.Component.MSBuild')
+          $vsJson=Native $vswhere (@('-products','*','-latest','-version','[17.14,18.0)','-requires')+$required+@('-format','json','-utf8'))
+          $instances=@($vsJson|ConvertFrom-Json)
+          if($instances.Count-ne1-or[version]$instances[0].installationVersion-lt[version]'17.14'-or[version]$instances[0].installationVersion-ge[version]'18.0'){throw 'One installed VS2022 17.14+ instance with the required components is required.'}
+          $vs=$instances[0].installationPath
+          $clang=Join-Path $vs 'VC/Tools/Llvm/x64/bin/clang-cl.exe'
+          $msbuild=Join-Path $vs 'MSBuild/Current/Bin/amd64/MSBuild.exe'
+          $vcvars=Join-Path $vs 'VC/Auxiliary/Build/vcvarsall.bat'
+          foreach($file in @($clang,$msbuild,$vcvars)){if(-not[IO.File]::Exists($file)){throw 'A required installed Visual Studio tool is missing.'}}
+          $clangText=Native $clang @('--version')
+          $match=[regex]::Match($clangText,'clang version ([0-9]+\.[0-9]+\.[0-9]+)')
+          if(-not$match.Success-or[version]$match.Groups[1].Value-lt[version]'19.0.0'){throw 'Visual Studio supplied Clang19+ is required.'}
+          $vcVersions=@(Get-ChildItem -LiteralPath (Join-Path $vs 'VC/Tools/MSVC') -Directory|Sort-Object {[version]$_.Name} -Descending)
+          $vc=@($vcVersions|Where-Object{[IO.File]::Exists((Join-Path $_.FullName 'bin/Hostx64/arm64/cl.exe'))-and[IO.File]::Exists((Join-Path $_.FullName 'atlmfc/include/atlbase.h'))-and[IO.File]::Exists((Join-Path $_.FullName 'atlmfc/lib/arm64/atls.lib'))}|Select-Object -First 1)
+          if($vc.Count-ne1){throw 'Installed MSVC ARM64 and ATL files are required.'}
+          $sdkVersion='10.0.26100.0'
+          $sdk=Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10'
+          $sdkFiles=@(('Include/'+$sdkVersion+'/um/bcrypt.h');('Include/'+$sdkVersion+'/um/apiquery2.h');('Lib/'+$sdkVersion+'/um/arm64/bcrypt.lib');('Lib/'+$sdkVersion+'/um/arm64/OneCore_apiset.lib');('Lib/'+$sdkVersion+'/ucrt/arm64/ucrt.lib'))
+          foreach($relative in $sdkFiles){if(-not[IO.File]::Exists((Join-Path $sdk $relative))){throw 'The actual Windows SDK26100 ARM64 headers/libraries are required.'}}
+          $rustc=(Get-Command rustc -CommandType Application).Source
+          $rustup=(Get-Command rustup -CommandType Application).Source
+          $rustText=Native $rustc @('--version')
+          $match=[regex]::Match($rustText,'^rustc ([0-9]+\.[0-9]+\.[0-9]+)')
+          if(-not$match.Success-or[version]$match.Groups[1].Value-lt[version]'1.86.0'){throw 'Rust1.86+ is required for enabled Temporal.'}
+          $rustToolchain=(Native $rustup @('show','active-toolchain')).Split(' ')[0]
+          if($rustToolchain-notmatch'^[A-Za-z0-9_.-]+$'){throw 'Unexpected active Rust toolchain spelling.'}
+          $targets=(Native $rustup @('target','list','--installed','--toolchain',$rustToolchain))-split'\r?\n'
+          $rustTargetAdded=$false
+          if($targets-cnotcontains'aarch64-pc-windows-msvc'){
+            # Only this standard-library target is acquired on the disposable CI worker.
+            $null=Native $rustup @('target','add','aarch64-pc-windows-msvc','--toolchain',$rustToolchain)
+            $rustTargetAdded=$true
+            $targets=(Native $rustup @('target','list','--installed','--toolchain',$rustToolchain))-split'\r?\n'
+          }
+          if($targets-cnotcontains'aarch64-pc-windows-msvc'){throw 'Rust ARM64 target is unavailable.'}
+          $python=(Get-Command python -CommandType Application).Source
+          $pythonText=Native $python @('--version')
+          $match=[regex]::Match($pythonText,'^Python ([0-9]+\.[0-9]+\.[0-9]+)')
+          if(-not$match.Success-or[version]$match.Groups[1].Value-lt[version]'3.10.0'-or[version]$match.Groups[1].Value-ge[version]'4.0.0'){throw 'A supported installed Python3.10+ is required.'}
+          $work=Join-Path $env:RUNNER_TEMP ('validation-node-'+$env:GITHUB_RUN_ID+'-'+$env:GITHUB_RUN_ATTEMPT)
+          if(Test-Path -LiteralPath $work){throw 'The build scope must be fresh.'}
+          $null=New-Item -ItemType Directory -Path $work
+          $artifact=Join-Path $work 'artifact';$null=New-Item -ItemType Directory -Path $artifact
+          $archive=Join-Path $work 'node-v26.10.0.tar.xz'
+          Invoke-WebRequest -Uri 'https://nodejs.org/download/release/v26.10.0/node-v26.10.0.tar.xz' -OutFile $archive -MaximumRedirection 0 -TimeoutSec 180
+          if((Get-Item -LiteralPath $archive).Length-ne62055788-or(Hash $archive)-cne'7B3A546D33CB7E15A43BDD7A57E0BE5D5FD5FFC553E6E4C120033E66F0BA20C5'){throw 'The official Node26.10 archive differs.'}
+          $null=Native tar @('-xf',$archive,'-C',$work)
+          $source=Join-Path $work 'node-v26.10.0'
+          foreach($row in $manifest.modifiedFiles){$file=Join-Path $source $row.relative;if((Hash $file)-cne$row.beforeSHA256){throw 'An original patch input differs from the pinned source.'}}
+          foreach($row in $manifest.unchangedInputs){if((Hash (Join-Path $source $row.relative))-cne$row.SHA256){throw 'An unchanged upstream build/license input differs.'}}
+          $changed=Native git @('-C',$source,'-c','core.autocrlf=false','apply','--numstat',$patch)
+          $paths=@($changed-split'\r?\n'|Where-Object{$_}|ForEach-Object{($_-split"`t")[2]})
+          if(($paths-join'|')-cne($expected-join'|')){throw 'The patch would modify an unexpected file set.'}
+          $null=Native git @('-C',$source,'-c','core.autocrlf=false','apply','--check',$patch)
+          $null=Native git @('-C',$source,'-c','core.autocrlf=false','apply',$patch)
+          foreach($row in $manifest.modifiedFiles){$file=Join-Path $source $row.relative;if((Get-Item -LiteralPath $file).Length-ne$row.afterBytes-or(Hash $file)-cne$row.afterSHA256){throw 'A patched file differs from its exact reviewed bytes.'}}
+          foreach($row in $manifest.unchangedInputs){if((Hash (Join-Path $source $row.relative))-cne$row.SHA256){throw 'Patch application changed an upstream build/license input.'}}
+          $toolchain=[ordered]@{visualStudioVersion=$instances[0].installationVersion;visualStudioPath=$vs;requiredComponents=$required;clangVersionOutput=$clangText;clangSHA256=(Hash $clang);msbuildVersion=[Diagnostics.FileVersionInfo]::GetVersionInfo($msbuild).FileVersion;msbuildSHA256=(Hash $msbuild);msvcVersion=$vc[0].Name;arm64CompilerSHA256=(Hash (Join-Path $vc[0].FullName 'bin/Hostx64/arm64/cl.exe'));sdkVersion=$sdkVersion;rustVersionOutput=$rustText;rustcSHA256=(Hash $rustc);rustToolchain=$rustToolchain;rustArm64TargetVerified=$true;rustArm64TargetAddedInDisposableWorker=$rustTargetAdded;pythonVersionOutput=$pythonText;imageVersion=$env:ImageVersion;runnerArchitecture=$env:PROCESSOR_ARCHITECTURE}
+          $receipt=[ordered]@{version=1;kind='validationNodeCrossBuildInputs';repository=$env:GITHUB_REPOSITORY;workflowCommit=$env:GITHUB_SHA;runId=$env:GITHUB_RUN_ID;runAttempt=$env:GITHUB_RUN_ATTEMPT;tag=$manifest.tag;upstreamCommit=$manifest.upstreamCommit;sourceArchiveSHA256=(Hash $archive);sourceBytes=(Get-Item -LiteralPath $archive).Length;patchSHA256=(Hash $patch);manifestSHA256=(Hash $manifestPath);modifiedFiles=$manifest.modifiedFiles;unchangedInputs=$manifest.unchangedInputs;toolchain=$toolchain;command=@('release','arm64','vs2022','v8temporal');temporalEnabled=$true;independentReleaseSignatureVerified=$false;staticApiComplianceAccepted=$false;guestRuntimeAccepted=$false;installedBinaryChanged=$false;compiled=$false}
+          $receipt|ConvertTo-Json -Depth 12|Set-Content -LiteralPath (Join-Path $artifact 'input-receipt.json') -Encoding utf8NoBOM
+          # Literal paths come from verified installed tools and the fixed fresh source root.
+          foreach($value in @($source,$vcvars)){if($value-match'["%&!^\r\n]'){throw 'A build command path contains ambiguous shell characters.'}}
+          $cmd=Join-Path $work 'build-fixed.cmd'
+          $commandLines=@('@echo off';('call "'+$vcvars+'" amd64_arm64 '+$sdkVersion);'if errorlevel 1 exit /b 1';('cd /d "'+$source+'"');'call vcbuild.bat release arm64 vs2022 v8temporal';'exit /b %errorlevel%')
+          $commandLines -join "`r`n"|Set-Content -LiteralPath $cmd -Encoding ascii
+          "NODE_BUILD_SCOPE=$work"|Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "NODE_BUILD_SOURCE=$source"|Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "NODE_BUILD_ARTIFACT=$artifact"|Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          "NODE_BUILD_COMMAND=$cmd"|Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+
+      - name: Build the reviewed ARM64 candidate with Temporal
+        run: |
+          $ErrorActionPreference='Stop'
+          Set-StrictMode -Version Latest
+          $code=1
+          $old=$ErrorActionPreference
+          try {$ErrorActionPreference='Continue';& $env:ComSpec /d /c $env:NODE_BUILD_COMMAND;$code=$LASTEXITCODE}
+          finally {$ErrorActionPreference=$old}
+          [ordered]@{version=1;kind='validationNodeNativeBuildExit';exitCode=$code;utc=[DateTime]::UtcNow.ToString('o');ARM64ExecutableRunOnX64=$false;staticApiComplianceAccepted=$false;guestRuntimeAccepted=$false}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $env:NODE_BUILD_ARTIFACT 'build-exit.json') -Encoding utf8NoBOM
+          if($code-ne0){throw 'The supported cross-build failed; its exit receipt is retained.'}
+
+      - name: Verify ARM64 artifact and preserve upstream licenses
+        run: |
+          $ErrorActionPreference='Stop'
+          Set-StrictMode -Version Latest
+          $exe=Join-Path $env:NODE_BUILD_SOURCE 'out/Release/node.exe'
+          $stream=[IO.File]::Open($exe,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+          try {
+            if($stream.Length-lt4096-or$stream.Length-gt256MB){throw 'The built Node artifact is outside its byte bound.'}
+            $reader=[IO.BinaryReader]::new($stream,[Text.Encoding]::ASCII,$true)
+            try {
+              if($reader.ReadUInt16()-ne23117){throw 'The output lacks an MZ header.'}
+              $stream.Position=60;$offset=$reader.ReadUInt32()
+              if($offset-lt64-or$offset-gt1MB-or$offset+26-gt$stream.Length){throw 'The output PE header offset differs.'}
+              $stream.Position=$offset
+              if($reader.ReadUInt32()-ne17744-or$reader.ReadUInt16()-ne43620){throw 'The compiled output is not ARM64 PE.'}
+              $stream.Position=$offset+24;if($reader.ReadUInt16()-ne523){throw 'The compiled output is not PE32+.'}
+            }finally{$reader.Dispose()}
+            $stream.Position=0;$hash=(Get-FileHash -InputStream $stream).Hash;$bytes=$stream.Length
+          }finally{$stream.Dispose()}
+          $artifact=$env:NODE_BUILD_ARTIFACT
+          Copy-Item -LiteralPath $exe -Destination (Join-Path $artifact 'node.exe')
+          Copy-Item -LiteralPath (Join-Path $env:NODE_BUILD_SOURCE 'LICENSE') -Destination (Join-Path $artifact 'LICENSE')
+          Copy-Item -LiteralPath (Join-Path $env:NODE_BUILD_SOURCE 'deps/uv/LICENSE') -Destination (Join-Path $artifact 'libuv-LICENSE')
+          Copy-Item -LiteralPath (Join-Path $env:NODE_BUILD_SOURCE 'deps/cares/LICENSE.md') -Destination (Join-Path $artifact 'c-ares-LICENSE.md')
+          if((Get-FileHash -LiteralPath (Join-Path $artifact 'node.exe')).Hash-cne$hash){throw 'The candidate artifact copy differs.'}
+          if((Get-FileHash -LiteralPath (Join-Path $artifact 'LICENSE')).Hash-cne'6B85EE1983D01FA2CDCDD5D1A3053C6221FAE41D6A54E43B416BF35969FC4128'-or(Get-FileHash -LiteralPath (Join-Path $artifact 'libuv-LICENSE')).Hash-cne'16DE0C32B265CB7D46A6D3BD614F259DD4D693A5E26B3407B04AAE8D73041F0C'-or(Get-FileHash -LiteralPath (Join-Path $artifact 'c-ares-LICENSE.md')).Hash-cne'460F5E768FDA3752CA2169A95DF062578A10FB126BFD65F3B9B1A1BED2F84807'){throw 'The upstream license bytes differ.'}
+          [ordered]@{version=1;kind='validationNodeArm64CrossBuildCandidate';repository=$env:GITHUB_REPOSITORY;workflowCommit=$env:GITHUB_SHA;runId=$env:GITHUB_RUN_ID;runAttempt=$env:GITHUB_RUN_ATTEMPT;nodeVersion='26.10.0';sourceArchiveSHA256='7B3A546D33CB7E15A43BDD7A57E0BE5D5FD5FFC553E6E4C120033E66F0BA20C5';patchSHA256='E7AC4A086B6AA359BD6A17FDD14878E7CAD074D1B828A18D15A96C41F3F1CBF6';nodeBytes=$bytes;nodeSHA256=$hash;machine='0xAA64';optionalHeaderMagic='0x020B';compiled=$true;temporalEnabled=$true;ARM64ExecutableRunOnX64=$false;nativeRuntimeSmokePerformed=$false;staticApiComplianceAccepted=$false;guestRuntimeAccepted=$false;installedBinaryChanged=$false;requiresOfficialApiScanAndGuestRuntime=$true;utc=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json -Depth 8|Set-Content -LiteralPath (Join-Path $artifact 'candidate-receipt.json') -Encoding utf8NoBOM
+
+      - name: Retain only candidate, licenses and build receipts
+        if: always() && env.NODE_BUILD_ARTIFACT != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: validation-node-v26.10.0-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.NODE_BUILD_ARTIFACT }}/node.exe
+            ${{ env.NODE_BUILD_ARTIFACT }}/LICENSE
+            ${{ env.NODE_BUILD_ARTIFACT }}/libuv-LICENSE
+            ${{ env.NODE_BUILD_ARTIFACT }}/c-ares-LICENSE.md
+            ${{ env.NODE_BUILD_ARTIFACT }}/input-receipt.json
+            ${{ env.NODE_BUILD_ARTIFACT }}/build-exit.json
+            ${{ env.NODE_BUILD_ARTIFACT }}/candidate-receipt.json
+          if-no-files-found: error
+          retention-days: 7

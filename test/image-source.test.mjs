@@ -68,6 +68,24 @@ test('dirty, unpublished and excluded committed source cannot become an image sn
   await assert.rejects(f.prepare(), /excluded file or link/);
 });
 
+test('fixed CI delivery inputs are public while application snapshots keep only application source', async t => {
+  const f = await fixture(t), original = await f.prepare();
+  const delivery = ['.github/workflows/build-validation-node.yml', 'patches/node-v26.10.0-validationos.patch', 'patches/node-v26.10.0-validationos.json', 'patches/README.md'];
+  for (const name of delivery) { await fs.mkdir(path.dirname(path.join(f.directory, name)), { recursive: true }); await fs.writeFile(path.join(f.directory, name), 'Public delivery fixture\n'); }
+  await f.git('add', ...delivery); await f.git('commit', '-m', 'Optional build delivery fixture');
+  f.setPublished((await f.git('rev-parse', 'HEAD')).toString().trim());
+  await f.git('update-ref', 'refs/remotes/origin/main', (await f.git('rev-parse', 'HEAD')).toString().trim());
+  const current = await f.prepare();
+  assert.notEqual(current.commit, original.commit);
+  assert.deepEqual(current.files, original.files);
+  for (const name of delivery) { assert.equal(Object.hasOwn(current.files, name), false); await assert.rejects(fs.access(path.join(current.source, name))); }
+  assert.equal((await f.verify(original.receiptFile)).commit, original.commit);
+  await fs.writeFile(path.join(f.directory, '.github/workflows/unknown.yml'), 'Excluded fixture');
+  await f.git('add', '.github/workflows/unknown.yml'); await f.git('commit', '-m', 'Unknown workflow fixture');
+  f.setPublished((await f.git('rev-parse', 'HEAD')).toString().trim());
+  await assert.rejects(f.prepare(), /excluded file or link/);
+});
+
 test('failed checks and a source mutation during checks do not seal a receipt', async t => {
   const f = await fixture(t);
   await assert.rejects(f.prepare({ check: async () => { throw new Error('Fixture check failed'); } }), /Fixture check failed/);
