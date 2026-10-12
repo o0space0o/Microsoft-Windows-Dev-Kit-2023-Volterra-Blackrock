@@ -206,7 +206,226 @@ jobs:
           if((Get-Item -LiteralPath $archive).Length-ne62055788-or(Hash $archive)-cne'7B3A546D33CB7E15A43BDD7A57E0BE5D5FD5FFC553E6E4C120033E66F0BA20C5'){throw 'The official Node26.10 archive differs.'}
           Phase 'Source download verified'
           Phase 'Source extraction start'
-          $null=Native tar @('-xf',$archive,'-C',$work) -TimeoutSeconds 1200
+          $extractorBody=@'
+          """Fixed Node release source extraction; no archive metadata restoration."""
+          import hashlib
+          import json
+          import lzma
+          import os
+          from pathlib import Path
+          import re
+          import stat
+          import sys
+          import tarfile
+          import time
+
+          EXPECTED = (62055788, "7B3A546D33CB7E15A43BDD7A57E0BE5D5FD5FFC553E6E4C120033E66F0BA20C5", 37977, 4205, 674699160)
+          SOURCE_FOLDER = "node-v26.10.0"
+          REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 1024)
+          BUFFER = 65536
+
+          def identity(info):
+              return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_nlink)
+
+          def ordinary(path, directory):
+              info = os.lstat(path)
+              if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & REPARSE:
+                  raise ValueError("redirected path")
+              if (directory and not stat.S_ISDIR(info.st_mode)) or (not directory and (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1)):
+                  raise ValueError("nonordinary path")
+              if os.path.normcase(os.path.abspath(path)) != os.path.normcase(os.path.realpath(path)):
+                  raise ValueError("aliased path")
+              return info
+
+          def ancestry(path):
+              target = Path(path)
+              for current in reversed((target, *target.parents)):
+                  ordinary(current, True)
+
+          def digest(stream):
+              stream.seek(0)
+              value = hashlib.sha256()
+              while True:
+                  data = stream.read(BUFFER)
+                  if not data:
+                      break
+                  value.update(data)
+              stream.seek(0)
+              return value.hexdigest().upper()
+
+          def member_path(member):
+              name = member.name
+              if member.isdir() and name.endswith("/"):
+                  name = name[:-1]
+              if not name or len(name) > 4096 or re.search(r'[\x00-\x1f\x7f\\:<>"|?*]', name):
+                  raise ValueError("unsafe member path")
+              parts = name.split("/")
+              if parts[0] != SOURCE_FOLDER or any(not part or part in (".", "..") or part.rstrip(" .") != part for part in parts):
+                  raise ValueError("member escaped source folder")
+              if any(re.fullmatch(r"(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?", part, re.I) for part in parts):
+                  raise ValueError("reserved member path")
+              if member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE) or member.sparse is not None:
+                  raise ValueError("links devices sparse or special members refused")
+              if type(member.size) is not int or member.size < 0 or (member.isdir() and member.size != 0):
+                  raise ValueError("invalid member size")
+              return parts
+
+          def extract_stream(stream, destination, expected, progress=None):
+              expected_size, expected_sha, expected_files, expected_dirs, expected_bytes = expected
+              before = os.fstat(stream.fileno())
+              if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size != expected_size or digest(stream) != expected_sha:
+                  raise ValueError("fixed source archive differs")
+              destination = Path(destination)
+              ancestry(destination)
+              root = destination / SOURCE_FOLDER
+              if os.path.lexists(root):
+                  raise ValueError("source folder must be fresh")
+              os.mkdir(root)
+              directories = {(): ordinary(root, True)}
+              names = set()
+              directory_members = set()
+              files = total = count = 0
+              manifest = hashlib.sha256()
+
+              def parents(parts):
+                  ancestry(destination)
+                  for index in range(len(parts) + 1):
+                      key = tuple(parts[:index])
+                      current = root.joinpath(*key)
+                      if key not in directories:
+                          os.mkdir(current)
+                          directories[key] = ordinary(current, True)
+                      now = ordinary(current, True)
+                      previous = directories[key]
+                      if (now.st_dev, now.st_ino) != (previous.st_dev, previous.st_ino):
+                          raise ValueError("source parent identity changed")
+
+              with tarfile.open(fileobj=stream, mode="r|xz") as archive:
+                  for member in archive:
+                      parts = member_path(member)
+                      relative = parts[1:]
+                      name = "/".join(parts)
+                      folded = name.casefold()
+                      if folded in names:
+                          raise ValueError("duplicate or case-colliding archive path")
+                      names.add(folded)
+                      count += 1
+                      if count > expected_files + expected_dirs:
+                          raise ValueError("source member count exceeds fixed closure")
+                      if member.isdir():
+                          parents(relative)
+                          directory_members.add(tuple(relative))
+                          if len(directory_members) > expected_dirs:
+                              raise ValueError("source directory count exceeds fixed closure")
+                          continue
+                      if not relative:
+                          raise ValueError("source root cannot be a file")
+                      files += 1
+                      total += member.size
+                      if files > expected_files or total > expected_bytes:
+                          raise ValueError("source file count or bytes exceed fixed closure")
+                      parents(relative[:-1])
+                      target = root.joinpath(*relative)
+                      flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                      descriptor = os.open(target, flags, 0o600)
+                      content = archive.extractfile(member)
+                      if content is None:
+                          os.close(descriptor)
+                          raise ValueError("regular archive member has no bytes")
+                      file_hash = hashlib.sha256()
+                      with os.fdopen(descriptor, "w+b") as output, content:
+                          remaining = member.size
+                          while remaining:
+                              data = content.read(min(BUFFER, remaining))
+                              if not data:
+                                  raise ValueError("source member ended early")
+                              if output.write(data) != len(data):
+                                  raise ValueError("source leaf write ended early")
+                              file_hash.update(data)
+                              remaining -= len(data)
+                          if content.read(1):
+                              raise ValueError("source member exceeds declared size")
+                          output.flush()
+                          if digest(output) != file_hash.hexdigest().upper():
+                              raise ValueError("created source bytes differ from archive member")
+                          held = os.fstat(output.fileno())
+                          named = ordinary(target, False)
+                          if held.st_size != member.size or identity(held) != identity(named):
+                              raise ValueError("created source leaf identity differs")
+                      parents(relative[:-1])
+                      encoded = name.encode("utf-8")
+                      manifest.update(len(encoded).to_bytes(4, "little") + encoded + member.size.to_bytes(8, "little") + file_hash.digest())
+                      if progress and count % 2000 == 0:
+                          progress(count, files, total)
+              if (files, len(directory_members), total) != (expected_files, expected_dirs, expected_bytes) or set(directories) != directory_members:
+                  raise ValueError("complete source closure differs")
+              if identity(before) != identity(os.fstat(stream.fileno())) or digest(stream) != expected_sha:
+                  raise ValueError("held source archive changed")
+              return {"source": str(root), "files": files, "directories": len(directory_members), "bytes": total,
+                      "sourceManifestSHA256": manifest.hexdigest().upper(), "sourceArchiveSHA256": expected_sha,
+                      "archiveMetadataRestored": False, "sourceBytesStreamedExactly": True, "allCreatedFilesReadBack": True}
+
+          def tool_metadata():
+              result = {"pythonExecutable": sys.executable, "pythonVersion": sys.version, "pythonVersionInfo": list(sys.version_info[:3]), "modules": {}}
+              for label, file in (("python", sys.executable), ("extractor", __file__), ("tarfile", tarfile.__file__), ("lzma", lzma.__file__)):
+                  with open(file, "rb") as stream:
+                      value = digest(stream)
+                  result["modules"][label] = {"path": os.path.abspath(file), "SHA256": value}
+              return result
+
+          def main(args):
+              if len(args) != 2 or any(not os.path.isabs(arg) or os.path.normpath(arg) != arg for arg in args):
+                  raise ValueError("exact archive and CI directory arguments required")
+              archive_path, destination = map(Path, args)
+              ancestry(archive_path.parent)
+              ancestry(destination)
+              if archive_path.parent != destination or archive_path.name != "node-v26.10.0.tar.xz":
+                  raise ValueError("archive must be the fixed fresh CI child")
+              report = destination / "source-extraction.json"
+              if os.path.lexists(report):
+                  raise ValueError("extraction receipt cannot be overwritten")
+              result = {"version": 1, "kind": "validationNodePythonSourceExtraction", "status": "failed", "compiled": False,
+                        "staticApiComplianceAccepted": False, "guestRuntimeAccepted": False, "archiveMetadataRestored": False}
+              started = time.monotonic()
+              code = 1
+              try:
+                  result["toolchain"] = tool_metadata()
+                  named = ordinary(archive_path, False)
+                  with open(archive_path, "rb") as stream:
+                      if identity(named) != identity(os.fstat(stream.fileno())):
+                          raise ValueError("archive identity changed before opening")
+                      result.update(extract_stream(stream, destination, EXPECTED, lambda count, files, size: print("Node source extraction progress: members=%d files=%d bytes=%d" % (count, files, size), flush=True)))
+                      if identity(named) != identity(ordinary(archive_path, False)):
+                          raise ValueError("named source archive changed")
+                  result["status"] = "source-extracted-awaiting-reviewed-patch"
+                  code = 0
+              except Exception as error:
+                  result["errorType"] = type(error).__name__
+                  result["errorClass"] = str(error) if isinstance(error, ValueError) else "standard-library or filesystem failure"
+              finally:
+                  result["elapsedMilliseconds"] = int((time.monotonic() - started) * 1000)
+                  ancestry(destination)
+                  with open(report, "xb") as output:
+                      output.write(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+                  print(json.dumps(result, sort_keys=True, separators=(",", ":")), flush=True)
+              return code
+
+          if __name__ == "__main__":
+              try:
+                  sys.exit(main(sys.argv[1:]))
+              except Exception as error:
+                  print(json.dumps({"kind": "validationNodePythonSourceExtraction", "status": "bootstrap-failed", "errorType": type(error).__name__, "compiled": False}), flush=True)
+                  sys.exit(1)
+          '@
+          $extractorFile=Join-Path $work 'extract-node2610.py'
+          $extractorBytes=[Text.UTF8Encoding]::new($false).GetBytes($extractorBody.Replace("`r`n","`n")+"`n")
+          $extractorStream=[IO.File]::Open($extractorFile,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+          try{$extractorStream.Write($extractorBytes,0,$extractorBytes.Length)}finally{$extractorStream.Dispose()}
+          if((Hash $extractorFile)-cne'B71029EE161CCA2A510A5DB988BE5E042398809FA78B3C7DF909E5DA7797B682'){throw 'The embedded reviewed Python extractor differs.'}
+          Write-Host ('Selected extraction Python: path='+$python+' SHA256='+(Hash $python)+' version='+$pythonText)
+          $extractionText=Native $python @('-I','-B',$extractorFile,$archive,$work) -TimeoutSeconds 1200
+          $extraction=($extractionText-split'\r?\n'|Select-Object -Last 1)|ConvertFrom-Json
+          if($extraction.version-ne1-or$extraction.kind-cne'validationNodePythonSourceExtraction'-or$extraction.status-cne'source-extracted-awaiting-reviewed-patch'-or$extraction.source-cne(Join-Path $work 'node-v26.10.0')-or$extraction.files-ne37977-or$extraction.directories-ne4205-or$extraction.bytes-ne674699160-or$extraction.sourceArchiveSHA256-cne'7B3A546D33CB7E15A43BDD7A57E0BE5D5FD5FFC553E6E4C120033E66F0BA20C5'-or$extraction.archiveMetadataRestored-ne$false-or$extraction.allCreatedFilesReadBack-ne$true-or$extraction.sourceBytesStreamedExactly-ne$true-or$extraction.compiled-ne$false){throw 'The exact streamed source extraction proof differs.'}
           Phase 'Source extraction closed'
           $source=Join-Path $work 'node-v26.10.0'
           foreach($row in $manifest.modifiedFiles){$file=Join-Path $source $row.relative;if((Hash $file)-cne$row.beforeSHA256){throw 'An original patch input differs from the pinned source.'}}
@@ -220,7 +439,7 @@ jobs:
           foreach($row in $manifest.modifiedFiles){$file=Join-Path $source $row.relative;if((Get-Item -LiteralPath $file).Length-ne$row.afterBytes-or(Hash $file)-cne$row.afterSHA256){throw 'A patched file differs from its exact reviewed bytes.'}}
           foreach($row in $manifest.unchangedInputs){if((Hash (Join-Path $source $row.relative))-cne$row.SHA256){throw 'Patch application changed an upstream build/license input.'}}
           Phase 'Reviewed patch application verified'
-          $toolchain=[ordered]@{visualStudioVersion=$instances[0].installationVersion;visualStudioPath=$vs;requiredComponents=$required;clangVersionOutput=$clangText;clangSHA256=(Hash $clang);msbuildVersion=[Diagnostics.FileVersionInfo]::GetVersionInfo($msbuild).FileVersion;msbuildSHA256=(Hash $msbuild);msvcVersion=$vc[0].Name;arm64CompilerSHA256=(Hash (Join-Path $vc[0].FullName 'bin/Hostx64/arm64/cl.exe'));sdkVersion=$sdkVersion;rustVersionOutput=$rustText;rustcSHA256=(Hash $rustc);rustToolchain=$rustToolchain;rustArm64TargetVerified=$true;rustArm64TargetAddedInDisposableWorker=$rustTargetAdded;pythonVersionOutput=$pythonText;imageVersion=$env:ImageVersion;runnerArchitecture=$env:PROCESSOR_ARCHITECTURE}
+          $toolchain=[ordered]@{visualStudioVersion=$instances[0].installationVersion;visualStudioPath=$vs;requiredComponents=$required;clangVersionOutput=$clangText;clangSHA256=(Hash $clang);msbuildVersion=[Diagnostics.FileVersionInfo]::GetVersionInfo($msbuild).FileVersion;msbuildSHA256=(Hash $msbuild);msvcVersion=$vc[0].Name;arm64CompilerSHA256=(Hash (Join-Path $vc[0].FullName 'bin/Hostx64/arm64/cl.exe'));sdkVersion=$sdkVersion;rustVersionOutput=$rustText;rustcSHA256=(Hash $rustc);rustToolchain=$rustToolchain;rustArm64TargetVerified=$true;rustArm64TargetAddedInDisposableWorker=$rustTargetAdded;pythonVersionOutput=$pythonText;pythonPath=$python;pythonSHA256=(Hash $python);sourceExtractorSHA256=(Hash $extractorFile);sourceExtractionReceiptSHA256=(Hash (Join-Path $work 'source-extraction.json'));sourceExtraction=$extraction;imageVersion=$env:ImageVersion;runnerArchitecture=$env:PROCESSOR_ARCHITECTURE}
           $receipt=[ordered]@{version=1;kind='validationNodeCrossBuildInputs';repository=$env:GITHUB_REPOSITORY;workflowCommit=$env:GITHUB_SHA;runId=$env:GITHUB_RUN_ID;runAttempt=$env:GITHUB_RUN_ATTEMPT;tag=$manifest.tag;upstreamCommit=$manifest.upstreamCommit;sourceArchiveSHA256=(Hash $archive);sourceBytes=(Get-Item -LiteralPath $archive).Length;patchSHA256=(Hash $patch);manifestSHA256=(Hash $manifestPath);modifiedFiles=$manifest.modifiedFiles;unchangedInputs=$manifest.unchangedInputs;toolchain=$toolchain;command=@('release','arm64','vs2022','v8temporal');temporalEnabled=$true;independentReleaseSignatureVerified=$false;staticApiComplianceAccepted=$false;guestRuntimeAccepted=$false;installedBinaryChanged=$false;compiled=$false}
           $receipt|ConvertTo-Json -Depth 12|Set-Content -LiteralPath (Join-Path $artifact 'input-receipt.json') -Encoding utf8NoBOM
           # Literal paths come from verified installed tools and the fixed fresh source root.
