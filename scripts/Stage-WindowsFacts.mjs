@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { verifyImageSource } from '../app/image-source.mjs';
 import { hash } from '../app/source-policy.mjs';
+import { validateOfflineImageMount } from '../app/image-mount.mjs';
 
 const sourceFile = 'scripts/Probe-WindowsFacts.cs';
 const buildScript = 'scripts/Build-WindowsFacts.ps1';
@@ -59,8 +60,7 @@ export function validateFactsManifest(manifest, source, binary) {
 export async function stageWindowsFacts({ receiptFile, workspace, mount, mode = 'copy', verify = verifyImageSource }) {
   if (!['copy', 'verify'].includes(mode)) throw new Error('Choose copy or verify for the facts payload.');
   const source = await verify(receiptFile, workspace);
-  const root = await fs.realpath(workspace), mounted = await fs.realpath(mount);
-  if (!samePath(workspace, root) || !samePath(mount, mounted) || !/^build\/development-\d{3}\/final-(boot|install)$/.test(path.relative(root, mounted).split(path.sep).join('/'))) throw new Error('Facts payload access requires the exact owned offline image mount.');
+  const { root, mounted } = await validateOfflineImageMount({ workspace, mount, receiptFile, source });
   await checkedPath(root, mounted, { directory: true });
   const binaryPath = path.join(root, binaryFile), manifestPath = path.join(root, manifestFile);
   const binary = await readOwned(root, binaryPath, 4_000_000), manifestBytes = await readOwned(root, manifestPath, 64_000);

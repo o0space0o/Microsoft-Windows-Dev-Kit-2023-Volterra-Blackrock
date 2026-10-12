@@ -8,24 +8,48 @@ import { hash } from '../app/source-policy.mjs';
 
 const binaryFile = 'private/tools/volterra-facts.exe';
 const manifestFile = 'private/tools/volterra-facts-build.json';
-async function fixture(t) {
+async function fixture(t, candidate = false) {
   const workspace = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'volterra-facts-')));
   t.after(async () => {
     const real = await fs.realpath(workspace), relative = path.relative(await fs.realpath(os.tmpdir()), real);
     assert.ok(relative.startsWith('volterra-facts-') && !relative.includes(path.sep));
     await fs.rm(real, { recursive: true, force: true });
   });
-  const mount = path.join(workspace, 'build/development-012/final-boot');
+  const candidateId = '11111111-2222-3333-4444-555555555555';
+  const mount = path.join(workspace, candidate ? `build/verification/media-candidate-development-013-${candidateId}/final-boot` : 'build/development-012/final-boot');
   await fs.mkdir(path.join(workspace, 'private/tools'), { recursive: true });
   await fs.mkdir(path.join(mount, 'Volterra/private/tools'), { recursive: true });
-  const source = { commit: 'a'.repeat(40), files: { 'scripts/Probe-WindowsFacts.cs': hash(Buffer.from('Owned C# source')), 'scripts/Build-WindowsFacts.ps1': hash(Buffer.from('Owned compiler script')) } };
+  const source = { version: 1, checksPassed: true, commit: 'a'.repeat(40), files: { 'scripts/Probe-WindowsFacts.cs': hash(Buffer.from('Owned C# source')), 'scripts/Build-WindowsFacts.ps1': hash(Buffer.from('Owned compiler script')) } };
   const binary = Buffer.from('Fixture binary, never executed');
   const manifest = { version: 1, kind: 'volterraWindowsFactsBuild', sourceCommit: source.commit, sourceFile: 'scripts/Probe-WindowsFacts.cs', sourceSHA256: source.files['scripts/Probe-WindowsFacts.cs'], buildScript: 'scripts/Build-WindowsFacts.ps1', buildScriptSHA256: source.files['scripts/Build-WindowsFacts.ps1'], executable: { file: binaryFile, SHA256: hash(binary), bytes: binary.length, target: 'AnyCPU; ARM64 Windows CLR required' }, compiler: { path: 'C:/Fixture/compiler.exe', SHA256: 'b'.repeat(64), fileVersion: 'Fixture' }, managementAssembly: { path: 'C:/Fixture/management.dll', SHA256: 'c'.repeat(64) }, guestCompatibilityVerified: false };
   await fs.writeFile(path.join(workspace, binaryFile), binary);
   await fs.writeFile(path.join(workspace, manifestFile), JSON.stringify(manifest));
-  return { workspace, mount, source, binary, manifest, verify: async () => source };
+  let receiptFile = 'Fixture already verified by injected source checker';
+  if (candidate) {
+    receiptFile = path.join(workspace, 'build/source-snapshots/fixture/source-receipt.json');
+    await fs.mkdir(path.dirname(receiptFile), { recursive: true });
+    const bytes = Buffer.from(JSON.stringify(source)); await fs.writeFile(receiptFile, bytes);
+    const identity = { version: 1, kind: 'volterraImageCandidateV1', buildName: 'development-013', candidateId, artifactRoot: path.dirname(mount),
+      baseArtifactRoot: path.join(workspace, 'build/development-006'), sourceReceipt: receiptFile, sourceReceiptSHA256: hash(bytes).toUpperCase(), sourceCommit: source.commit,
+      baseImageReceiptSHA256: '1'.repeat(64), baseBootSHA256: '2'.repeat(64), baseInstallSHA256: '3'.repeat(64), privateDevelopmentOnly: true,
+      publicDistributionAllowed: false, bootAccepted: false, runtimeAccepted: false, recoveryAccepted: false, physicalHardwareAccepted: false };
+    await fs.writeFile(path.join(path.dirname(mount), 'candidate-identity.json'), JSON.stringify(identity));
+  }
+  return { workspace, mount, source, binary, manifest, receiptFile, verify: async () => source };
 }
-const options = f => ({ receiptFile: 'Fixture already verified by injected source checker', workspace: f.workspace, mount: f.mount, verify: f.verify });
+const options = f => ({ receiptFile: f.receiptFile, workspace: f.workspace, mount: f.mount, verify: f.verify });
+
+test('facts copy and committed-byte verification admit the same source-bound current013 candidate boundary', async t => {
+  const f = await fixture(t, true), identityFile = path.join(path.dirname(f.mount), 'candidate-identity.json');
+  const identityBefore = await fs.readFile(identityFile), sourceBefore = await fs.readFile(f.receiptFile);
+  const copied = await stageWindowsFacts(options(f)), verified = await stageWindowsFacts({ ...options(f), mode: 'verify' });
+  assert.equal(copied.sourceCommit, f.source.commit); assert.equal(verified.executableSHA256, copied.executableSHA256);
+  assert.equal(verified.guestCompatibilityVerified, false);
+  assert.deepEqual(await fs.readFile(identityFile), identityBefore); assert.deepEqual(await fs.readFile(f.receiptFile), sourceBefore);
+  const identity = JSON.parse(identityBefore); identity.sourceReceiptSHA256 = 'A'.repeat(64);
+  await fs.writeFile(identityFile, JSON.stringify(identity));
+  await assert.rejects(stageWindowsFacts({ ...options(f), mode: 'verify' }), /source receipt bytes/);
+});
 
 test('facts overlay copies exactly the two source-bound files, preserving vendor and account bytes', async t => {
   const f = await fixture(t), payload = path.join(f.mount, 'Volterra');

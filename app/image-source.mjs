@@ -3,6 +3,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { allowedSource, validateSource, hash } from './source-policy.mjs';
+import { validateOfflineImageMount } from './image-mount.mjs';
 
 const repository = 'o0space0o/Microsoft-Windows-Dev-Kit-2023-Volterra-Blackrock';
 const inside = (base, target) => { const relative = path.relative(base, target); return relative && !relative.startsWith('..') && !path.isAbsolute(relative); };
@@ -95,8 +96,7 @@ export async function verifyImageSource(receiptFile, workspace, { git = process.
 // applies an image, mounts a disk, touches host Windows or changes boot settings.
 export async function copyImagePayload(receiptFile, workspace, mount, options = {}) {
   const source = await verifyImageSource(receiptFile, workspace, options);
-  const root = await fs.realpath(workspace), mounted = await fs.realpath(mount);
-  if (!/^build\/development-[0-9]{3}\/final-(boot|install)$/.test(path.relative(root, mounted).split(path.sep).join('/'))) throw new Error('Image payload target is not an owned offline build mount.');
+  const { mounted } = await validateOfflineImageMount({ workspace, mount, receiptFile, source });
   for (const name of ['scripts/Apply-SourceUpdate.mjs', 'image/Volterra-Startup.cmd', 'PROJECT_BRIEF.md']) if (!source.files[name]) throw new Error('Required boot source is missing from the checked commit.');
   const samePath = (target, real) => path.relative(path.resolve(target), path.resolve(real)) === '';
   async function directory(base, target) {

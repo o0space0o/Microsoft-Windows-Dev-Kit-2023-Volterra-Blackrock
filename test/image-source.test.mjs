@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { prepareImageSource, verifyImageSource, copyImagePayload, executeBytes } from '../app/image-source.mjs';
-import { approved } from '../app/source-policy.mjs';
+import { approved, hash } from '../app/source-policy.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const portable = path.join(root, 'private/tools/git/cmd/git.exe');
 const gitPath = process.env.VOLTERRA_GIT_PATH || (existsSync(portable) ? portable : 'git');
@@ -115,6 +115,25 @@ test('offline source copying removes obsolete source, preserves private/vendor f
   assert.deepEqual(await fs.readFile(path.join(mount, 'Windows/Volterra-Startup.cmd')), await fs.readFile(path.join(receipt.source, 'image/Volterra-Startup.cmd')));
   await assert.rejects(fs.access(path.join(mount, 'Windows/VolterraStartup.cmd')));
   assert.equal(JSON.parse(await fs.readFile(path.join(mount, 'Volterra/private/source-version.json'), 'utf8')).commit, receipt.commit);
+});
+
+test('source copying admits the exact source-bound current013 candidate and refuses an identity change before any writes', async t => {
+  const f = await fixture(t), receipt = await f.prepare(), candidateId = '11111111-2222-3333-4444-555555555555';
+  const artifactRoot = path.join(f.directory, `build/verification/media-candidate-development-013-${candidateId}`), mount = path.join(artifactRoot, 'final-install');
+  await fs.mkdir(mount, { recursive: true });
+  const identityFile = path.join(artifactRoot, 'candidate-identity.json');
+  const identity = { version: 1, kind: 'volterraImageCandidateV1', buildName: 'development-013', candidateId, artifactRoot,
+    baseArtifactRoot: path.join(f.directory, 'build/development-006'), sourceReceipt: receipt.receiptFile,
+    sourceReceiptSHA256: hash(await fs.readFile(receipt.receiptFile)).toUpperCase(), sourceCommit: receipt.commit,
+    baseImageReceiptSHA256: '1'.repeat(64), baseBootSHA256: '2'.repeat(64), baseInstallSHA256: '3'.repeat(64), privateDevelopmentOnly: true,
+    publicDistributionAllowed: false, bootAccepted: false, runtimeAccepted: false, recoveryAccepted: false, physicalHardwareAccepted: false };
+  await fs.writeFile(identityFile, JSON.stringify({ ...identity, sourceCommit: '0'.repeat(40) }));
+  await assert.rejects(f.copy(receipt.receiptFile, mount), /verified source receipt/);
+  assert.deepEqual(await fs.readdir(mount), []);
+  await fs.writeFile(identityFile, JSON.stringify(identity));
+  assert.equal((await f.copy(receipt.receiptFile, mount)).commit, receipt.commit);
+  assert.deepEqual(await fs.readFile(path.join(mount, 'Windows/Volterra-Startup.cmd')), await fs.readFile(path.join(receipt.source, 'image/Volterra-Startup.cmd')));
+  assert.deepEqual(await fs.readFile(identityFile), Buffer.from(JSON.stringify(identity)));
 });
 
 test('offline copying uses lstat when mounted provider Dirents misidentify regular files and directories as links', async t => {
