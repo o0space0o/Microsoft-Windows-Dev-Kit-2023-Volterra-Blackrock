@@ -2,11 +2,15 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)][ValidatePattern('^development-[0-9]{3}$')][string]$BuildName,
-    [string]$SourceReceipt
+    [string]$SourceReceipt,
+    [string]$CandidateDirectory
 )
 $ErrorActionPreference = 'Stop'
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$build = Join-Path $workspace ('build\'+$BuildName)
+. (Join-Path $PSScriptRoot 'Image-Candidate.ps1')
+$selection=Get-ImageBuildSelection $workspace $BuildName $CandidateDirectory ($PSBoundParameters.ContainsKey('CandidateDirectory'))
+$build=$selection.build
+$candidateBinding=Get-ImageCandidateBinding $selection $SourceReceipt
 # Finalized WIMs and accepted media are immutable inputs. An update needs a
 # separately reviewed fresh candidate; never silently re-service current013.
 foreach($seal in @('Finalize-result.json','iso-receipt.json')){
@@ -16,6 +20,12 @@ $dism = 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\De
 function Dism([string]$Name,[string[]]$Arguments) {
     & $dism /English @Arguments "/LogPath:$build\$Name.log" > (Join-Path $build ($Name+'-output.txt'))
     if ($LASTEXITCODE -ne 0) { throw "File payload finalization failed ($Name, $LASTEXITCODE)." }
+}
+function Save-Finalization($Value){
+    if($selection.candidate){
+        $Value.candidateId=$selection.candidateId;$Value.artifactRoot=$build;$Value.candidateIdentitySHA256=$candidateBinding.identitySHA256;$Value.sourceReceiptSHA256=$candidateBinding.source.SHA256
+        Save-ImageCandidateJson (Join-Path $build 'Finalize-result.json') $Value $build
+    }else{$Value | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $build 'Finalize-result.json') -Encoding utf8}
 }
 try {
     $node = Join-Path $workspace 'private\tools\node.exe'
@@ -28,12 +38,15 @@ try {
     $verified = & $node (Join-Path $PSScriptRoot 'Prepare-ImageSource.mjs') --verify $SourceReceipt
     if ($LASTEXITCODE -ne 0) { throw 'Checked image source verification failed.' }
     $source = $verified | ConvertFrom-Json
+    if($selection.candidate-and$source.commit-cne$candidateBinding.identity.sourceCommit){throw 'Candidate source commit changed.'}
     $factsStage = Join-Path $source.source 'scripts\Stage-WindowsFacts.mjs'
     if (-not $source.files.'scripts/Stage-WindowsFacts.mjs' -or (Get-FileHash -LiteralPath $factsStage -Algorithm SHA256).Hash.ToLowerInvariant() -ne $source.files.'scripts/Stage-WindowsFacts.mjs') { throw 'The private facts staging helper is not bound to the immutable checked source.' }
     $receipt = Get-Content -LiteralPath (Join-Path $build 'image-receipt.json') -Raw | ConvertFrom-Json
+    if($selection.candidate){Assert-ImageCandidateBaseInputs $selection $candidateBinding}
     $factsByImage = @{}
     foreach ($kind in @('boot','install')) {
         $wim = Join-Path $build "output\$kind.wim"
+        if($selection.candidate){Assert-ImageCandidatePath $wim $build | Out-Null}
         if ((Get-FileHash -LiteralPath $wim).Hash -ne $receipt.($kind+'SHA256')) { throw 'Serviced image hash changed.' }
         $mount = Join-Path $build ('final-'+$kind)
         if (Test-Path -LiteralPath $mount) { throw 'An existing finalization mount will not be reused.' }
@@ -64,6 +77,14 @@ try {
     $receipt | Add-Member -NotePropertyName sourceCommit -NotePropertyValue $source.commit -Force
     $receipt | Add-Member -NotePropertyName sourceFiles -NotePropertyValue $source.files -Force
     $receipt | Add-Member -NotePropertyName privateOriginalFacts -NotePropertyValue $factsByImage -Force
+    if($selection.candidate){
+        $receipt | Add-Member -NotePropertyName candidateId -NotePropertyValue $selection.candidateId -Force
+        $receipt | Add-Member -NotePropertyName artifactRoot -NotePropertyValue $build -Force
+        $receipt | Add-Member -NotePropertyName candidateIdentitySHA256 -NotePropertyValue $candidateBinding.identitySHA256 -Force
+        $receipt | Add-Member -NotePropertyName sourceReceiptSHA256 -NotePropertyValue $candidateBinding.source.SHA256 -Force
+        Get-ImageCandidateBinding $selection $SourceReceipt | Out-Null
+    }
+    if($selection.candidate){Assert-ImageCandidatePath (Join-Path $build 'image-receipt.json') $build | Out-Null}
     $receipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $build 'image-receipt.json') -Encoding utf8
-    @{ status='passed'; fileOverlayOnly=$true; sourceCommit=$source.commit; runtimeAcceptancePending=$true } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $build 'Finalize-result.json') -Encoding utf8
-} catch { @{status='failed';error=$_.Exception.Message} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $build 'Finalize-result.json') -Encoding utf8; exit 1 }
+    Save-Finalization @{ status='passed'; fileOverlayOnly=$true; sourceCommit=$source.commit; runtimeAcceptancePending=$true }
+} catch { Save-Finalization @{status='failed';error=$_.Exception.Message}; exit 1 }
