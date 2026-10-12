@@ -104,7 +104,7 @@ internal static class PrivateWindowsState
         // Standalone account/profile callers may create a managed child only
         // inside an already protected private State parent. Metadata-only held
         // ancestors alone do not establish that creation prerequisite.
-        using(var handle=CreateFileW(parent,0x20080,3,IntPtr.Zero,3,0x02200000,IntPtr.Zero)){
+        using(var handle=CreateFileW(parent,0x20081,3,IntPtr.Zero,3,0x02200000,IntPtr.Zero)){
             if(handle.IsInvalid)throw Native("PRIVATE_PARENT_SECURITY_DENIED");FileInfo info=Information(handle);if((info.Attributes&0x10)==0||!String.Equals(Final(handle),ExpectedFinal(parent,context.Volume),StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("PRIVATE_PARENT_IDENTITY_REFUSED");PrivateAccess(Descriptor(handle),context.Principals,true,true);
         }
     }
@@ -118,7 +118,7 @@ internal static class PrivateWindowsState
     }
     private static List<HeldParent> HoldParents(string parent,string volume) {
         var paths=new List<string>();for(string cursor=parent;cursor!=null;cursor=Path.GetDirectoryName(cursor)){paths.Add(cursor);if(paths.Count>64)throw new InvalidOperationException("PRIVATE_PARENT_BOUND_REFUSED");}paths.Reverse();var held=new List<HeldParent>();
-        try{foreach(string named in paths){uint attributes=GetFileAttributesW(named);if(attributes==0xFFFFFFFF)throw Native("PRIVATE_PARENT_METADATA_FAILED");if((attributes&0x400)!=0||(attributes&0x10)==0)throw new InvalidOperationException("PRIVATE_PARENT_REFUSED");var handle=CreateFileW(named,0x80,3,IntPtr.Zero,3,0x02200000,IntPtr.Zero);if(handle.IsInvalid){handle.Dispose();throw Native("PRIVATE_PARENT_METADATA_FAILED");}var item=new HeldParent{Handle=handle,Named=named,Expected=ExpectedFinal(named,volume)};held.Add(item);item.Before=Information(handle);item.Check();}return held;}catch{foreach(var item in held)item.Dispose();throw;}
+        try{foreach(string named in paths){uint attributes=GetFileAttributesW(named);if(attributes==0xFFFFFFFF)throw Native("PRIVATE_PARENT_METADATA_FAILED");if((attributes&0x400)!=0||(attributes&0x10)==0)throw new InvalidOperationException("PRIVATE_PARENT_REFUSED");var handle=CreateFileW(named,0x81,3,IntPtr.Zero,3,0x02200000,IntPtr.Zero);if(handle.IsInvalid){handle.Dispose();throw Native("PRIVATE_PARENT_METADATA_FAILED");}var item=new HeldParent{Handle=handle,Named=named,Expected=ExpectedFinal(named,volume)};held.Add(item);item.Before=Information(handle);item.Check();}return held;}catch{foreach(var item in held)item.Dispose();throw;}
     }
     internal static int Run(string[] args) {
         Console.OutputEncoding=new UTF8Encoding(false);Context context=new Context();string mode=null,scope=null,error=null;int code=0;bool success=false;List<HeldParent> parents=null;
