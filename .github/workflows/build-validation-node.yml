@@ -38,10 +38,63 @@ jobs:
             return ($output -join "`n")
           }
           function Hash([string]$File) {(Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash}
+          function Patch-BlobArguments([string]$Repo,[string]$Commit) {
+            if(-not$Repo-or$Commit-cnotmatch'^[a-f0-9]{40}$'){throw 'One fixed repository and exact workflow commit are required.'}
+            return @('-C',$Repo,'cat-file','blob',($Commit+':patches/node-v26.10.0-validationos.patch'))
+          }
+          function Read-PatchBlobOutput($Process,[int]$TimeoutMilliseconds=30000) {
+            $clock=[Diagnostics.Stopwatch]::StartNew()
+            $streams=@($Process.StandardOutput.BaseStream,$Process.StandardError.BaseStream)
+            $caps=@(65536,4096);$buffers=@([byte[]]::new(4096),[byte[]]::new(4096))
+            $saved=@([IO.MemoryStream]::new(),[IO.MemoryStream]::new())
+            $tasks=@($streams[0].ReadAsync($buffers[0],0,4096),$streams[1].ReadAsync($buffers[1],0,4096));$done=@($false,$false)
+            try {
+              while(-not($done[0]-and$done[1])) {
+                if($clock.ElapsedMilliseconds-ge$TimeoutMilliseconds){throw 'The fixed committed-blob reader exceeded its deadline.'}
+                for($at=0;$at-lt2;$at++) {
+                  if(-not$done[$at]-and$tasks[$at].IsCompleted) {
+                    $count=$tasks[$at].GetAwaiter().GetResult()
+                    if($count-eq0){$done[$at]=$true}
+                    else {
+                      if($saved[$at].Length+$count-gt$caps[$at]){throw 'The fixed committed-blob stream exceeded its cap.'}
+                      $saved[$at].Write($buffers[$at],0,$count)
+                      $tasks[$at]=$streams[$at].ReadAsync($buffers[$at],0,4096)
+                    }
+                  }
+                }
+                if(-not($done[0]-and$done[1])){[Threading.Thread]::Sleep(10)}
+              }
+              $remaining=$TimeoutMilliseconds-[int]$clock.ElapsedMilliseconds
+              if($remaining-le0-or-not$Process.WaitForExit($remaining)){throw 'The fixed committed-blob process did not close.'}
+              return [pscustomobject]@{bytes=$saved[0].ToArray();stderrBytes=$saved[1].Length;exitCode=$Process.ExitCode}
+            }finally{$saved[0].Dispose();$saved[1].Dispose()}
+          }
+          function Assert-PatchBlob($Observed) {
+            if($Observed.exitCode-ne0-or$Observed.stderrBytes-ne0){throw ('The fixed committed-blob query failed: exit='+$Observed.exitCode+' stderrBytes='+$Observed.stderrBytes)}
+            $sha=[Security.Cryptography.SHA256]::Create()
+            try{$actualHash=([BitConverter]::ToString($sha.ComputeHash($Observed.bytes))).Replace('-','')}finally{$sha.Dispose()}
+            if($Observed.bytes.Length-ne9940-or$actualHash-cne'E7AC4A086B6AA359BD6A17FDD14878E7CAD074D1B828A18D15A96C41F3F1CBF6'){throw ('Committed patch differs: bytes='+$Observed.bytes.Length+' SHA256='+$actualHash)}
+            return ,$Observed.bytes
+          }
+          function Read-ExactPatchBlob([string]$Git,[string]$Repo,[string]$Commit) {
+            $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$Git;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
+            $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+            foreach($argument in (Patch-BlobArguments $Repo $Commit)){$start.ArgumentList.Add($argument)}
+            $process=[Diagnostics.Process]::new();$process.StartInfo=$start;$started=$false
+            try {
+              if(-not$process.Start()){throw 'The fixed committed-blob process did not start.'};$started=$true
+              $observed=Read-PatchBlobOutput $process
+              return ,(Assert-PatchBlob $observed)
+            }finally{if($started-and-not$process.HasExited){$process.Kill();$process.WaitForExit(5000)|Out-Null};$process.Dispose()}
+          }
           $repo=$env:GITHUB_WORKSPACE
           $patch=Join-Path $repo 'patches/node-v26.10.0-validationos.patch'
-          # Use the committed blob without Git for Windows line-ending conversion.
-          $null=Native git @('-C',$repo,'-c','core.autocrlf=false','checkout-index','--force','--','patches/node-v26.10.0-validationos.patch')
+          # Read raw committed bytes; a text pipeline or checkout can alter newlines.
+          $git=(Get-Command git -CommandType Application).Source
+          $patchBytes=Read-ExactPatchBlob $git $repo $env:GITHUB_SHA
+          $patchLeaf=Get-Item -LiteralPath $patch -Force
+          if($patchLeaf.PSIsContainer-or$patchLeaf.LinkType-or($patchLeaf.Attributes-band[IO.FileAttributes]::ReparsePoint)){throw 'The checked-out patch destination must be an ordinary file.'}
+          [IO.File]::WriteAllBytes($patch,$patchBytes)
           if((Get-Item -LiteralPath $patch).Length-ne9940-or(Hash $patch)-cne'E7AC4A086B6AA359BD6A17FDD14878E7CAD074D1B828A18D15A96C41F3F1CBF6'){throw 'The exact reviewed seven-file patch differs.'}
           $manifestPath=Join-Path $repo 'patches/node-v26.10.0-validationos.json'
           if((Get-Item -LiteralPath $manifestPath).Length-gt65536){throw 'Build-input manifest exceeds its bound.'}
