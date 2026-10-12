@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { verifyImageSource } from '../app/image-source.mjs';
 import { hash } from '../app/source-policy.mjs';
-import { validateOfflineImageMount } from '../app/image-mount.mjs';
+import { validateOfflineImageMount, applicationOverlayOptions } from '../app/image-mount.mjs';
 
 const sourceFile = 'scripts/Probe-WindowsFacts.cs';
 const privateStateSourceFile = 'scripts/Private-WindowsState.cs';
@@ -60,10 +60,11 @@ export function validateFactsManifest(manifest, source, binary) {
   if (typeof manifest.compiler.fileVersion !== 'string') throw new Error('The facts compiler version is missing.');
 }
 
-export async function stageWindowsFacts({ receiptFile, workspace, mount, mode = 'copy', verify = verifyImageSource }) {
+export async function stageWindowsFacts({ receiptFile, workspace, mount, mode = 'copy', verify = verifyImageSource, applicationOverlayAuthority = '', expectedApplicationOverlayAuthoritySHA256 = '' }) {
   if (!['copy', 'verify'].includes(mode)) throw new Error('Choose copy or verify for the facts payload.');
   const source = await verify(receiptFile, workspace);
-  const { root, mounted } = await validateOfflineImageMount({ workspace, mount, receiptFile, source });
+  const binding = await validateOfflineImageMount({ workspace, mount, receiptFile, source, applicationOverlayAuthority, expectedApplicationOverlayAuthoritySHA256 });
+  const { root, mounted } = binding;
   await checkedPath(root, mounted, { directory: true });
   const binaryPath = path.join(root, binaryFile), manifestPath = path.join(root, manifestFile);
   const binary = await readOwned(root, binaryPath, 4_000_000), manifestBytes = await readOwned(root, manifestPath, 64_000);
@@ -86,11 +87,19 @@ export async function stageWindowsFacts({ receiptFile, workspace, mount, mode = 
     if (hash(await readOwned(mounted, destination, file === binaryFile ? 4_000_000 : 64_000)) !== files[file]) throw new Error('The persisted facts payload differs from its verified private input.');
   }
   if (hash(await readOwned(root, binaryPath, 4_000_000)) !== files[binaryFile] || hash(await readOwned(root, manifestPath, 64_000)) !== files[manifestFile]) throw new Error('The private facts inputs changed during offline image access.');
-  return { version: 1, mode, sourceCommit: source.commit, compiledSourceCommit: manifest.sourceCommit, sourceFile, sourceSHA256: manifest.sourceSHA256, privateStateSourceFile, privateStateSourceSHA256: manifest.privateStateSourceSHA256, buildScript, buildScriptSHA256: manifest.buildScriptSHA256, executableSHA256: files[binaryFile], provenanceSHA256: files[manifestFile], bytes: binary.length, files, payloadBytesVerified: true, guestCompatibilityVerified: false, runtimeAccepted: false, physicalHardwareAccepted: false };
+  return { version: 1, mode, sourceCommit: source.commit, compiledSourceCommit: manifest.sourceCommit, sourceFile, sourceSHA256: manifest.sourceSHA256, privateStateSourceFile, privateStateSourceSHA256: manifest.privateStateSourceSHA256, buildScript, buildScriptSHA256: manifest.buildScriptSHA256, executableSHA256: files[binaryFile], provenanceSHA256: files[manifestFile], bytes: binary.length, files, payloadBytesVerified: true, guestCompatibilityVerified: false, runtimeAccepted: false, physicalHardwareAccepted: false, ...(binding.applicationSourceAuthoritySHA256 ? {
+    applicationSourceAuthoritySHA256: binding.applicationSourceAuthoritySHA256, compositionSourceCommit: binding.compositionSourceCommit,
+    originalCandidateIdentitySHA256: binding.candidateIdentitySHA256.toUpperCase(), compositionReceiptSHA256: binding.featureCompositionSHA256 } : {}) };
+}
+
+export function parseFactsArguments(args) {
+  if (![3, 4, 6].includes(args.length)) throw new Error('Unsupported facts staging arguments.');
+  const [receiptFile, workspace, mount, mode = 'copy', authority = '', SHA256 = ''] = args;
+  if (!receiptFile || !workspace || !mount || !['copy', 'verify'].includes(mode)) throw new Error('Exact facts source, workspace, mount and mode required.');
+  return { receiptFile, workspace, mount, mode, ...applicationOverlayOptions(authority, SHA256) };
 }
 
 if (process.argv[1] && samePath(process.argv[1], fileURLToPath(import.meta.url))) {
-  const [receiptFile, workspace, mount, mode, ...extra] = process.argv.slice(2);
-  try { if (extra.length) throw new Error('Unsupported facts staging arguments.'); console.log(JSON.stringify(await stageWindowsFacts({ receiptFile, workspace, mount, mode }))); }
+  try { console.log(JSON.stringify(await stageWindowsFacts(parseFactsArguments(process.argv.slice(2))))); }
   catch (error) { console.error(error.message); process.exitCode = 1; }
 }

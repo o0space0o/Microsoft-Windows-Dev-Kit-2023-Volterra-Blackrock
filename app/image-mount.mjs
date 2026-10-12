@@ -21,12 +21,12 @@ async function checkedPath(root, target, directory) {
   }
 }
 
-async function boundedJson(root, file) {
+async function boundedBytes(root, file, limit = 131072) {
   await checkedPath(root, file, false);
   const handle = await fs.open(file, 'r');
   try {
     const before = await handle.stat({ bigint: true });
-    if (!before.isFile() || before.nlink !== 1n || before.size < 2n || before.size > 131072n) throw new Error('An offline image identity input exceeds its JSON bounds.');
+    if (!before.isFile() || before.nlink !== 1n || before.size < 2n || before.size > BigInt(limit)) throw new Error('An offline image identity input exceeds its JSON bounds.');
     async function readBytes() {
       const buffer = Buffer.alloc(Number(before.size) + 1); let length = 0;
       while (length < buffer.length) {
@@ -41,8 +41,51 @@ async function boundedJson(root, file) {
     const after = await handle.stat({ bigint: true }), current = await fs.lstat(file, { bigint: true });
     if (!bytes.equals(repeated) || ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs', 'nlink'].some(key => before[key] !== after[key] || after[key] !== current[key])) throw new Error('An offline image identity input changed during reading.');
     await checkedPath(root, file, false);
-    return { value: JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, '')), SHA256: hash(bytes) };
+    return { bytes, SHA256: hash(bytes) };
   } finally { await handle.close(); }
+}
+async function boundedJson(root, file, limit = 131072, strict = false) {
+  const record = await boundedBytes(root, file, limit);
+  const text = strict ? new TextDecoder('utf-8', { fatal: true }).decode(record.bytes) : record.bytes.toString('utf8');
+  return { ...record, value: JSON.parse(text.replace(/^\uFEFF/, '')) };
+}
+
+const nativeInputs = ['scripts/Probe-WindowsFacts.cs', 'scripts/Private-WindowsState.cs', 'scripts/Build-WindowsFacts.ps1'];
+const overlayNoClaims = ['sourceApplicationOverlayPerformed', 'factsOverlayPerformed', 'originalCandidateIdentityWritten', 'compositionReceiptWritten', 'originalInputPlanWritten', 'existing006Written', 'canonical013Written', 'currentPointerWritten', 'bootAccepted', 'runtimeAccepted', 'apiCompatibilityAccepted', 'recoveryAccepted', 'physicalHardwareAccepted', 'approvedVisualMatch', 'publicDistributionAllowed'];
+export function applicationOverlayOptions(authority = '', SHA256 = '') {
+  if (authority === '' && SHA256 === '') return {};
+  if (typeof authority !== 'string' || !authority || !path.isAbsolute(authority) || path.normalize(authority) !== authority || !sha256(SHA256)) throw new Error('An application overlay requires an exact authority path and its explicit uppercase SHA256.');
+  return { applicationOverlayAuthority: authority, expectedApplicationOverlayAuthoritySHA256: SHA256 };
+}
+async function checkedReceipt(root, receiptFile, expectedSHA256, source, strict = false) {
+  const relative = path.relative(path.join(root, 'build/source-snapshots'), receiptFile);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('The candidate source receipt is outside the owned snapshots.');
+  const record = await boundedJson(root, receiptFile, 131072, strict);
+  if ((expectedSHA256 && record.SHA256 !== expectedSHA256.toLowerCase()) || (source && JSON.stringify(canonical(record.value)) !== JSON.stringify(canonical(source)))) throw new Error('The candidate source receipt bytes differ from its creation identity.');
+  return record;
+}
+async function assertApplicationOverlay(root, artifactRoot, candidateId, identity, composition, original, receipt, source, options) {
+  if (!exactPath(options.applicationOverlayAuthority, path.join(artifactRoot, 'application-overlay-source.json'))) throw new Error('Only the exact application overlay authority leaf is permitted.');
+  const authority = await boundedJson(root, options.applicationOverlayAuthority, 131072, true);
+  if (authority.SHA256.toUpperCase() !== options.expectedApplicationOverlayAuthoritySHA256) throw new Error('The application overlay authority bytes differ from their external seal.');
+  const facts = await boundedJson(root, path.join(root, 'private/tools/volterra-facts-build.json'), 64000, true);
+  const binary = await boundedBytes(root, path.join(root, 'private/tools/volterra-facts.exe'), 4000000), manifest = facts.value;
+  if (manifest?.version !== 1 || manifest.kind !== 'volterraWindowsFactsBuild' || !/^[a-f0-9]{40}$/.test(manifest.sourceCommit || '') || manifest.sourceFile !== nativeInputs[0] || manifest.privateStateSourceFile !== nativeInputs[1] || manifest.buildScript !== nativeInputs[2] || manifest.guestCompatibilityVerified !== false) throw new Error('An overlay requires the preserved actual facts build provenance.');
+  for (const [file, key] of [[nativeInputs[0], 'sourceSHA256'], [nativeInputs[1], 'privateStateSourceSHA256'], [nativeInputs[2], 'buildScriptSHA256']]) {
+    if (!/^[a-f0-9]{64}$/i.test(manifest[key] || '') || source.files?.[file]?.toUpperCase() !== manifest[key].toUpperCase()) throw new Error('Application overlay cannot reuse facts built from different native inputs.');
+  }
+  if (manifest.executable?.file !== 'private/tools/volterra-facts.exe' || manifest.executable.SHA256?.toLowerCase() !== binary.SHA256 || manifest.executable.bytes !== binary.bytes.length || manifest.executable.target !== 'AnyCPU; ARM64 Windows CLR required') throw new Error('The application overlay facts executable differs from its preserved manifest.');
+  for (const item of [manifest.compiler, manifest.managementAssembly]) if (typeof item?.path !== 'string' || !/^[a-f0-9]{64}$/i.test(item.SHA256 || '')) throw new Error('Facts dependency provenance is incomplete.');
+  if (typeof manifest.compiler.fileVersion !== 'string' || source.commit === original.value.commit || receipt.SHA256 === original.SHA256) throw new Error('An application transition requires a distinct checked source and complete facts provenance.');
+  const wanted = { version: 1, kind: 'candidate013CheckedApplicationOverlayAuthority', status: 'reviewed-checked-source-transition', candidateId, buildName: 'development-013', artifactRoot,
+    originalCandidateIdentitySHA256: identity.SHA256.toUpperCase(), compositionReceiptSHA256: composition.SHA256.toUpperCase(), originalInputBindingSHA256: identity.value.inputBindingSHA256,
+    compositionSourceCommit: original.value.commit, compositionSourceReceipt: identity.value.sourceReceipt, compositionSourceReceiptSHA256: original.SHA256.toUpperCase(),
+    applicationSourceCommit: source.commit, applicationSourceReceipt: receipt.path, applicationSourceReceiptSHA256: receipt.SHA256.toUpperCase(),
+    factsCompiledSourceCommit: manifest.sourceCommit, factsExecutableSHA256: binary.SHA256.toUpperCase(), factsProvenanceSHA256: facts.SHA256.toUpperCase(),
+    factsNativeInputSHA256: Object.fromEntries(nativeInputs.map(file => [file, source.files[file].toUpperCase()])), privateDevelopmentOnly: true, operationalAuthorityGranted: true,
+    ...Object.fromEntries(overlayNoClaims.map(key => [key, false])) };
+  for (const [key, expected] of Object.entries(wanted)) if (key === 'factsNativeInputSHA256' ? JSON.stringify(canonical(authority.value[key])) !== JSON.stringify(canonical(expected)) : authority.value[key] !== expected) throw new Error('The checked application transition differs: ' + key);
+  return { applicationSourceAuthoritySHA256: authority.SHA256.toUpperCase(), compositionSourceCommit: original.value.commit, applicationSourceCommit: source.commit, factsCompiledSourceCommit: manifest.sourceCommit, factsExecutableSHA256: binary.SHA256.toUpperCase(), factsProvenanceSHA256: facts.SHA256.toUpperCase() };
 }
 
 // Pure admission declarations for the proposed public boundary; no entrypoint.
@@ -97,7 +140,8 @@ function assertFeatureCandidate(value, proof, context) {
 // Both source and facts overlays use this boundary. A candidate is admitted by
 // its existing creation identity and exact verified source receipt, never by a
 // broader path regex alone. This function performs no mount or image operation.
-export async function validateOfflineImageMount({ workspace, mount, receiptFile, source }) {
+export async function validateOfflineImageMount({ workspace, mount, receiptFile, source, applicationOverlayAuthority = '', expectedApplicationOverlayAuthoritySHA256 = '' }) {
+  const overlay = applicationOverlayOptions(applicationOverlayAuthority, expectedApplicationOverlayAuthoritySHA256);
   const root = await fs.realpath(workspace), mounted = await fs.realpath(mount);
   if (!samePath(workspace, root) || !samePath(mount, mounted)) throw new Error('An offline image workspace or mount is redirected.');
   const relative = path.relative(root, mounted).split(path.sep).join('/');
@@ -105,28 +149,43 @@ export async function validateOfflineImageMount({ workspace, mount, receiptFile,
   const candidate = /^build\/verification\/media-candidate-development-013-([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})\/final-(boot|install)$/.exec(relative);
   if (!ordinary && !candidate) throw new Error('Image payload target is not an exact owned offline build mount.');
   await checkedPath(root, mounted, true);
-  if (ordinary) return { root, mounted, candidate: false };
+  if (ordinary) { if (overlay.applicationOverlayAuthority) throw new Error('Application transition authority is only permitted for a v2 candidate.'); return { root, mounted, candidate: false }; }
   const candidateId = candidate[1], artifactRoot = path.dirname(mounted);
   if (candidateId === '00000000-0000-0000-0000-000000000000') throw new Error('A candidate mount requires a nonzero creation identity.');
   const identity = await boundedJson(root, path.join(artifactRoot, 'candidate-identity.json'));
   const value = identity.value;
-  let featureCompositionSHA256;
+  let featureCompositionSHA256, compositionRecord, original, applicationBinding;
   if (value?.version === 2) {
     const composition = await boundedJson(root, path.join(artifactRoot, 'feature-composition.json'));
+    compositionRecord = composition;
     featureCompositionSHA256 = composition.SHA256.toUpperCase();
-    assertFeatureCandidate(value, composition.value, { candidateId, artifactRoot, source, exactPath,
+    let compositionSource = source;
+    if (overlay.applicationOverlayAuthority) {
+      if (typeof value.sourceReceipt !== 'string' || !exactPath(value.sourceReceipt, path.resolve(value.sourceReceipt)) || !sha256(value.sourceReceiptSHA256)) throw new Error('Original v2 source receipt identity differs.');
+      original = await checkedReceipt(root, value.sourceReceipt, value.sourceReceiptSHA256, undefined, true);
+      if (original.value?.version !== 1 || original.value.checksPassed !== true || original.value.commit !== value.sourceCommit || !original.value.files || typeof original.value.files !== 'object' || Array.isArray(original.value.files)) throw new Error('Original checked composition source receipt is invalid.');
+      compositionSource = original.value;
+    }
+    assertFeatureCandidate(value, composition.value, { candidateId, artifactRoot, source: compositionSource, exactPath,
       imagePath: kind => path.join(artifactRoot, 'output', kind+'.wim'), compositionSHA256: featureCompositionSHA256 });
   } else {
+  if (overlay.applicationOverlayAuthority) throw new Error('Application transition authority is only permitted for a v2 candidate.');
   if (value?.version !== 1 || value.kind !== 'volterraImageCandidateV1' || value.buildName !== 'development-013' || value.candidateId !== candidateId
     || !exactPath(value.artifactRoot, artifactRoot) || !exactPath(value.baseArtifactRoot, path.join(root, 'build/development-006'))
     || !sha256(value.baseImageReceiptSHA256) || !sha256(value.baseBootSHA256) || !sha256(value.baseInstallSHA256)
     || value.privateDevelopmentOnly !== true || value.publicDistributionAllowed !== false || value.bootAccepted !== false || value.runtimeAccepted !== false || value.recoveryAccepted !== false || value.physicalHardwareAccepted !== false) throw new Error('The candidate mount creation identity differs.');
   }
-  if (typeof receiptFile !== 'string' || !exactPath(value.sourceReceipt, path.resolve(receiptFile))
+  if (typeof receiptFile !== 'string' || !exactPath(receiptFile, path.resolve(receiptFile)) || source?.checksPassed !== true) throw new Error('The overlay source must be a separately verified exact source receipt.');
+  if (overlay.applicationOverlayAuthority) {
+    if (source.version !== 1 || !/^[a-f0-9]{40}$/.test(source.commit || '') || !source.files || typeof source.files !== 'object' || Array.isArray(source.files)) throw new Error('The application source receipt is invalid.');
+    // Its original serialization is sealed by the external sidecar below.
+    const receipt = await checkedReceipt(root, receiptFile, undefined, source, true);
+    receipt.path = receiptFile;
+    applicationBinding = await assertApplicationOverlay(root, artifactRoot, candidateId, identity, compositionRecord, original, receipt, source, overlay);
+    return { root, mounted, candidate: true, candidateId, artifactRoot, candidateIdentitySHA256: identity.SHA256, sourceReceiptSHA256: receipt.SHA256, featureCompositionSHA256, ...applicationBinding };
+  }
+  if (!exactPath(value.sourceReceipt, path.resolve(receiptFile))
     || !sha256(value.sourceReceiptSHA256) || value.sourceCommit !== source?.commit || source?.checksPassed !== true) throw new Error('The candidate mount is not bound to its verified source receipt.');
-  const receiptRelative = path.relative(path.join(root, 'build/source-snapshots'), path.resolve(receiptFile));
-  if (!receiptRelative || receiptRelative === '..' || receiptRelative.startsWith(`..${path.sep}`) || path.isAbsolute(receiptRelative)) throw new Error('The candidate source receipt is outside the owned snapshots.');
-  const receipt = await boundedJson(root, path.resolve(receiptFile));
-  if (receipt.SHA256 !== value.sourceReceiptSHA256.toLowerCase() || JSON.stringify(canonical(receipt.value)) !== JSON.stringify(canonical(source))) throw new Error('The candidate source receipt bytes differ from its creation identity.');
+  const receipt = await checkedReceipt(root, path.resolve(receiptFile), value.sourceReceiptSHA256, source);
   return { root, mounted, candidate: true, candidateId, artifactRoot, candidateIdentitySHA256: identity.SHA256, sourceReceiptSHA256: receipt.SHA256, ...(featureCompositionSHA256 ? { featureCompositionSHA256 } : {}) };
 }

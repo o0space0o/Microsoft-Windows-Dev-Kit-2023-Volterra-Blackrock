@@ -96,7 +96,9 @@ export async function verifyImageSource(receiptFile, workspace, { git = process.
 // applies an image, mounts a disk, touches host Windows or changes boot settings.
 export async function copyImagePayload(receiptFile, workspace, mount, options = {}) {
   const source = await verifyImageSource(receiptFile, workspace, options);
-  const { mounted } = await validateOfflineImageMount({ workspace, mount, receiptFile, source });
+  const binding = await validateOfflineImageMount({ workspace, mount, receiptFile, source,
+    applicationOverlayAuthority: options.applicationOverlayAuthority, expectedApplicationOverlayAuthoritySHA256: options.expectedApplicationOverlayAuthoritySHA256 });
+  const { mounted } = binding;
   for (const name of ['scripts/Apply-SourceUpdate.mjs', 'app/private-state.mjs', 'image/Volterra-Startup.cmd', 'PROJECT_BRIEF.md']) if (!source.files[name]) throw new Error('Required boot source is missing from the checked commit.');
   const samePath = (target, real) => path.relative(path.resolve(target), path.resolve(real)) === '';
   async function directory(base, target) {
@@ -179,5 +181,8 @@ export async function copyImagePayload(receiptFile, workspace, mount, options = 
   await write(mounted, path.join(mounted, 'AGENTS.md'), instructions, hash(instructions));
   const copied = await validateSource(payload, Object.keys(source.files));
   if (Object.keys(source.files).some(name => copied[name] !== source.files[name])) throw new Error('The image payload does not match the checked Git commit.');
-  return { commit: source.commit, files: source.files };
+  return { commit: source.commit, files: source.files, ...(binding.applicationSourceAuthoritySHA256 ? {
+    applicationSourceAuthoritySHA256: binding.applicationSourceAuthoritySHA256, compositionSourceCommit: binding.compositionSourceCommit,
+    compiledSourceCommit: binding.factsCompiledSourceCommit, originalCandidateIdentitySHA256: binding.candidateIdentitySHA256.toUpperCase(),
+    compositionReceiptSHA256: binding.featureCompositionSHA256 } : {}) };
 }

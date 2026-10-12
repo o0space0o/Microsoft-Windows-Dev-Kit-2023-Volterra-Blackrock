@@ -5,7 +5,9 @@ param(
     [string]$SourceReceipt,
     [string]$CandidateDirectory,
     [string]$FeatureCompositionReceipt,
-    [ValidatePattern('^[A-F0-9]{64}$')][string]$ExpectedFeatureCompositionSHA256
+    [ValidatePattern('^[A-F0-9]{64}$')][string]$ExpectedFeatureCompositionSHA256,
+    [string]$ApplicationOverlayAuthority,
+    [ValidatePattern('^[A-F0-9]{64}$')][string]$ExpectedApplicationOverlayAuthoritySHA256
 )
 $ErrorActionPreference='Stop'
 $workspace=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -16,16 +18,17 @@ $build=$selection.build
 $candidateBinding=$null;$refreshStage=0
 function Save($value) {
     if($selection.candidate){
-        $value.candidateId=$selection.candidateId;$value.artifactRoot=$build;$value.sourceCommit=$candidateBinding.identity.sourceCommit;$value.candidateIdentitySHA256=$candidateBinding.identitySHA256
-        if($candidateBinding.identity.version-eq2){$value.featureCompositionSHA256=$candidateBinding.composition.SHA256}
+        $value.candidateId=$selection.candidateId;$value.artifactRoot=$build;$value.sourceCommit=$candidateBinding.source.value.commit;$value.candidateIdentitySHA256=$candidateBinding.identitySHA256
+        if($candidateBinding.identity.version-eq2){$value.compositionSourceCommit=$candidateBinding.identity.sourceCommit;if($ApplicationOverlayAuthority){$value.applicationSourceAuthoritySHA256=$candidateBinding.applicationOverlayAuthority.SHA256};$value.featureCompositionSHA256=$candidateBinding.composition.SHA256}
         $name=if($value.status-eq'running'){$script:refreshStage++;'refresh-stage-'+$script:refreshStage.ToString('00')+'.json'}else{'refresh-result.json'}
         Save-ImageCandidateJson (Join-Path $build $name) $value $build
     }else{$value | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $build 'refresh-result.json') -Encoding utf8}
 }
 $featureRequested=([bool]$FeatureCompositionReceipt-or[bool]$ExpectedFeatureCompositionSHA256)
+if(([bool]$ApplicationOverlayAuthority-or[bool]$ExpectedApplicationOverlayAuthoritySHA256)-and-not$featureRequested){throw 'Application source authority requires the explicit measured feature branch.'}
 $basis='development-006'
 if($featureRequested){
-    $candidateBinding=Get-ImageCandidateBinding $selection $SourceReceipt $FeatureCompositionReceipt $ExpectedFeatureCompositionSHA256
+    $candidateBinding=Get-ImageCandidateBinding $selection $SourceReceipt $FeatureCompositionReceipt $ExpectedFeatureCompositionSHA256 $ApplicationOverlayAuthority $ExpectedApplicationOverlayAuthoritySHA256
     if($null-eq$candidateBinding-or$candidateBinding.identity.version-ne2){throw 'Explicit reviewed collected v2 candidate required.'}
     Assert-ImageCandidateBaseInputs $selection $candidateBinding
     foreach($seal in @('refresh-result.json','refresh-stage-01.json','Finalize-result.json','iso-receipt.json')){if(Test-Path -LiteralPath (Join-Path $build $seal)){throw 'Existing feature overlay evidence cannot be reused.'}}
@@ -66,6 +69,7 @@ try {
     $nested=@{BuildName=$BuildName;SourceReceipt=$SourceReceipt}
     if($selection.candidate){$nested.CandidateDirectory=$build}
     if($featureRequested){$nested.FeatureCompositionReceipt=$FeatureCompositionReceipt;$nested.ExpectedFeatureCompositionSHA256=$ExpectedFeatureCompositionSHA256}
+    if($ApplicationOverlayAuthority){$nested.ApplicationOverlayAuthority=$ApplicationOverlayAuthority;$nested.ExpectedApplicationOverlayAuthoritySHA256=$ExpectedApplicationOverlayAuthoritySHA256}
     & (Join-Path $PSScriptRoot 'Finalize-ImagePayload.ps1') @nested
     if ($LASTEXITCODE -ne 0) { throw 'File-only helper overlay failed.' }
     Save @{status='running';base=$basis;build=$BuildName;phase='Building private ARM64 ISO'}

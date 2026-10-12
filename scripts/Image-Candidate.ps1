@@ -67,13 +67,20 @@ function Assert-ImageCandidateIdentity($Selection,$Record,$Source) {
     if($value.version-ne1-or$value.kind-cne'volterraImageCandidateV1'-or$value.buildName-cne'development-013'-or$value.candidateId-cne$Selection.candidateId-or-not[string]::Equals($value.artifactRoot,$Selection.build,[StringComparison]::OrdinalIgnoreCase)-or-not[string]::Equals($value.sourceReceipt,$Source.path,[StringComparison]::OrdinalIgnoreCase)-or$value.sourceReceiptSHA256-cne$Source.SHA256-or$value.sourceCommit-cne$Source.value.commit-or-not[string]::Equals($value.baseArtifactRoot,$base,[StringComparison]::OrdinalIgnoreCase)-or$value.privateDevelopmentOnly-ne$true-or$value.publicDistributionAllowed-ne$false-or$value.bootAccepted-ne$false-or$value.runtimeAccepted-ne$false-or$value.recoveryAccepted-ne$false-or$value.physicalHardwareAccepted-ne$false){throw 'Exact owned candidate identity/source binding differs.'}
     foreach($name in @('baseImageReceiptSHA256','baseBootSHA256','baseInstallSHA256')){if($value.$name-cnotmatch'^[A-F0-9]{64}$'){throw 'Candidate base input hash differs.'}}
 }
-function Get-ImageCandidateBinding($Selection,[string]$SourceReceipt,[string]$FeatureCompositionReceipt,[string]$ExpectedFeatureCompositionSHA256) {
+function Get-ImageCandidateBinding($Selection,[string]$SourceReceipt,[string]$FeatureCompositionReceipt,[string]$ExpectedFeatureCompositionSHA256,[string]$ApplicationOverlayAuthority,[string]$ExpectedApplicationOverlayAuthoritySHA256) {
     $featureRequested=([bool]$FeatureCompositionReceipt-or[bool]$ExpectedFeatureCompositionSHA256)
-    if(-not$Selection.candidate){if($featureRequested){throw 'Feature authority is only allowed for an explicit candidate.'};return $null}
+    $overlayRequested=([bool]$ApplicationOverlayAuthority-or[bool]$ExpectedApplicationOverlayAuthoritySHA256)
+    if(-not$Selection.candidate){if($featureRequested-or$overlayRequested){throw 'Feature authority is only allowed for an explicit candidate.'};return $null}
     Assert-ImageCandidatePath $Selection.build $Selection.build | Out-Null
     $source=Get-ImageCandidateSource $SourceReceipt $Selection.workspace
     $record=Read-ImageCandidateFile (Join-Path $Selection.build 'candidate-identity.json') $Selection.build
-    if($record.value.version-eq2){return Get-ImageFeatureCandidateBinding $Selection $SourceReceipt $FeatureCompositionReceipt $ExpectedFeatureCompositionSHA256}
+    if($record.value.version-eq2){
+        $original=Get-ImageFeatureCandidateBinding $Selection $record.value.sourceReceipt $FeatureCompositionReceipt $ExpectedFeatureCompositionSHA256
+        if($source.path-ceq$original.source.path-and$source.SHA256-ceq$original.source.SHA256){if($overlayRequested){throw 'The original source does not need a transition authority.'};return $original}
+        if(-not$overlayRequested){throw 'A changed application source requires its explicit external authority.'}
+        return Get-ImageApplicationOverlayBinding $Selection $original $source $ApplicationOverlayAuthority $ExpectedApplicationOverlayAuthoritySHA256
+    }
+    if($overlayRequested){throw 'Application source authority is only permitted for measured v2 composition.'}
     if($featureRequested){throw 'A v1 candidate cannot consume feature authority.'}
     Assert-ImageCandidateIdentity $Selection $record $source
     return [pscustomobject]@{identity=$record.value;identitySHA256=$record.SHA256;source=$source}
@@ -168,5 +175,72 @@ function Assert-ImageFeatureCandidateInitialInputs($Selection,$Binding) {
         $meta=Get-Item -LiteralPath $file -Force
         $image=@($Binding.composition.value.images|Where-Object kind -CEQ $kind)
         if($meta.PSIsContainer-or$image.Count-ne1-or$meta.Length-ne$image[0].bytes-or(Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash-cne$wanted){throw 'Composed WIM bytes differ before the first mount.'}
+    }
+}
+
+# Declarations for the proposed explicit layer; no entrypoint or source rewrite.
+function Get-ImageApplicationNativeInputs($Source){
+    $values=[ordered]@{}
+    foreach($file in @('scripts/Probe-WindowsFacts.cs','scripts/Private-WindowsState.cs','scripts/Build-WindowsFacts.ps1')){
+        $value=$Source.value.files.$file
+        if($value-isnot[string]-or$value-cnotmatch'^[A-Fa-f0-9]{64}$'){throw 'Every application native/build input needs its checked source seal.'}
+        $values[$file]=$value.ToUpperInvariant()
+    }
+    return [pscustomobject]$values
+}
+function Get-ImageApplicationFacts([string]$Workspace,$Source){
+    $root=Join-Path $Workspace 'private/tools';$manifest=Read-ImageCandidateFile (Join-Path $root 'volterra-facts-build.json') $root
+    if((Get-Item -LiteralPath $manifest.path -Force).Length-gt64000){throw 'Facts provenance exceeds the fixed bound.'}
+    $value=$manifest.value;$native=Get-ImageApplicationNativeInputs $Source
+    if(($value.version-isnot[int]-and$value.version-isnot[long])-or$value.version-ne1-or$value.kind-cne'volterraWindowsFactsBuild'-or$value.sourceCommit-isnot[string]-or$value.sourceCommit-cnotmatch'^[a-f0-9]{40}$'-or$value.sourceFile-cne'scripts/Probe-WindowsFacts.cs'-or$value.privateStateSourceFile-cne'scripts/Private-WindowsState.cs'-or$value.buildScript-cne'scripts/Build-WindowsFacts.ps1'-or$value.guestCompatibilityVerified-isnot[bool]-or$value.guestCompatibilityVerified){throw 'Actual source-bound compiled facts provenance required.'}
+    foreach($pair in @(@('scripts/Probe-WindowsFacts.cs','sourceSHA256'),@('scripts/Private-WindowsState.cs','privateStateSourceSHA256'),@('scripts/Build-WindowsFacts.ps1','buildScriptSHA256'))){$actual=$value.($pair[1]);if($actual-isnot[string]-or$actual-cnotmatch'^[A-Fa-f0-9]{64}$'-or$actual.ToUpperInvariant()-cne$native.($pair[0])){throw 'Facts reuse requires identical application native/compiler inputs.'}}
+    foreach($input in @($value.compiler,$value.managementAssembly)){if($input.path-isnot[string]-or$input.SHA256-isnot[string]-or$input.SHA256-cnotmatch'^[A-Fa-f0-9]{64}$'){throw 'Actual compiled dependency provenance is incomplete.'}}
+    if($value.compiler.fileVersion-isnot[string]){throw 'Actual compiler version required.'}
+    $file=Assert-ImageCandidatePath (Join-Path $root 'volterra-facts.exe') $root;$item=Get-Item -LiteralPath $file -Force
+    if($item.PSIsContainer-or$item.Length-lt1-or$item.Length-gt4000000){throw 'Facts executable exceeds its ordinary-file bound.'}
+    $streams=@(Get-Item -LiteralPath $file -Stream '*' -Force -ErrorAction Stop);if($streams.Count-ne1-or$streams[0].Stream-cne':$DATA'){throw 'Facts executable has unclassified streams.'}
+    $read=[IO.File]::Open($file,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    try{
+        if($read.Length-ne$item.Length){throw 'Facts executable length changed.'};$actualSHA=(Get-FileHash -InputStream $read -Algorithm SHA256).Hash
+        if($value.executable.file-cne'private/tools/volterra-facts.exe'-or($value.executable.bytes-isnot[int]-and$value.executable.bytes-isnot[long])-or$value.executable.bytes-ne$read.Length-or$value.executable.SHA256-isnot[string]-or$value.executable.SHA256-cnotmatch'^[A-Fa-f0-9]{64}$'-or$value.executable.SHA256.ToUpperInvariant()-cne$actualSHA-or$value.executable.target-cne'AnyCPU; ARM64 Windows CLR required'){throw 'Actual facts executable differs from its preserved compiled provenance.'}
+        Assert-ImageCandidatePath $file $root|Out-Null
+        return [pscustomobject]@{compiledSourceCommit=$value.sourceCommit;executableSHA256=$actualSHA;executableBytes=$read.Length;provenanceSHA256=$manifest.SHA256;nativeInputSHA256=$native}
+    }finally{$read.Dispose()}
+}
+function New-ImageApplicationOverlayValue($Selection,$CompositionBinding,$ApplicationSource,$Facts){
+    if($CompositionBinding.identity.version-ne2-or$ApplicationSource.value.commit-ceq$CompositionBinding.identity.sourceCommit){throw 'Only a separate checked application-source transition may create a layer.'}
+    $value=[ordered]@{version=1;kind='candidate013CheckedApplicationOverlayAuthority';status='reviewed-checked-source-transition';candidateId=$Selection.candidateId;buildName='development-013';artifactRoot=$Selection.build;originalCandidateIdentitySHA256=$CompositionBinding.identitySHA256;compositionReceiptSHA256=$CompositionBinding.composition.SHA256;originalInputBindingSHA256=$CompositionBinding.identity.inputBindingSHA256;compositionSourceCommit=$CompositionBinding.identity.sourceCommit;compositionSourceReceipt=$CompositionBinding.source.path;compositionSourceReceiptSHA256=$CompositionBinding.source.SHA256;applicationSourceCommit=$ApplicationSource.value.commit;applicationSourceReceipt=$ApplicationSource.path;applicationSourceReceiptSHA256=$ApplicationSource.SHA256;factsCompiledSourceCommit=$Facts.compiledSourceCommit;factsExecutableSHA256=$Facts.executableSHA256;factsProvenanceSHA256=$Facts.provenanceSHA256;factsNativeInputSHA256=$Facts.nativeInputSHA256;privateDevelopmentOnly=$true;operationalAuthorityGranted=$true}
+    foreach($name in @('sourceApplicationOverlayPerformed','factsOverlayPerformed','originalCandidateIdentityWritten','compositionReceiptWritten','originalInputPlanWritten','existing006Written','canonical013Written','currentPointerWritten','bootAccepted','runtimeAccepted','apiCompatibilityAccepted','recoveryAccepted','physicalHardwareAccepted','approvedVisualMatch','publicDistributionAllowed')){$value[$name]=$false}
+    return [pscustomobject]$value
+}
+function Assert-ImageApplicationOverlayValue($Selection,$CompositionBinding,$ApplicationSource,$Facts,$Record){
+    $value=$Record.value;$wanted=New-ImageApplicationOverlayValue $Selection $CompositionBinding $ApplicationSource $Facts
+    if(($value.version-isnot[int]-and$value.version-isnot[long])-or$value.version-ne1){throw 'Application source authority version must be integer1.'}
+    foreach($property in $wanted.PSObject.Properties){
+        $actual=$value.($property.Name);$expected=$property.Value
+        if($property.Name-ceq'factsNativeInputSHA256'){
+            if($actual-isnot[pscustomobject]-or@($actual.PSObject.Properties).Count-ne3){throw 'Only exact three application native input seals allowed.'}
+            foreach($native in $expected.PSObject.Properties){if($actual.($native.Name)-isnot[string]-or$actual.($native.Name)-cne$native.Value){throw 'Application native input projection differs.'}}
+        }elseif($expected-is[bool]){if($actual-isnot[bool]-or$actual-ne$expected){throw 'Application source authority must preserve typed operation/acceptance flags.'}}
+        elseif($actual-cne$expected){throw ('Application source authority field differs: '+$property.Name)}
+    }
+}
+function Get-ImageApplicationOverlayBinding($Selection,$CompositionBinding,$ApplicationSource,[string]$ApplicationOverlayAuthority,[string]$ExpectedApplicationOverlayAuthoritySHA256){
+    if($ApplicationOverlayAuthority-cne(Join-Path $Selection.build 'application-overlay-source.json')-or$ExpectedApplicationOverlayAuthoritySHA256-cnotmatch'^[A-F0-9]{64}$'){throw 'Explicit exact application source authority and external reviewed SHA required.'}
+    $record=Read-ImageCandidateFile $ApplicationOverlayAuthority $Selection.build
+    if($record.SHA256-cne$ExpectedApplicationOverlayAuthoritySHA256){throw 'Externally reviewed application source authority changed.'}
+    $facts=Get-ImageApplicationFacts $Selection.workspace $ApplicationSource
+    Assert-ImageApplicationOverlayValue $Selection $CompositionBinding $ApplicationSource $facts $record
+    return [pscustomobject]@{identity=$CompositionBinding.identity;identitySHA256=$CompositionBinding.identitySHA256;composition=$CompositionBinding.composition;compositionSource=$CompositionBinding.source;source=$ApplicationSource;inputKind='officialPredefinedWpfComposition';applicationOverlayAuthority=$record;facts=$facts}
+}
+function Assert-ImageApplicationOverlayStageResult($Value,$Binding,[switch]$Facts){
+    if($Value.applicationSourceAuthoritySHA256-cne$Binding.applicationOverlayAuthority.SHA256-or$Value.compositionSourceCommit-cne$Binding.identity.sourceCommit-or$Value.originalCandidateIdentitySHA256-cne$Binding.identitySHA256-or$Value.compositionReceiptSHA256-cne$Binding.composition.SHA256-or$Value.compiledSourceCommit-cne$Binding.facts.compiledSourceCommit){throw 'Application stage returned a different source/composition/compiled authority.'}
+    if($Facts){
+        foreach($pair in @(@('executableSHA256','executableSHA256'),@('provenanceSHA256','provenanceSHA256'))){$hash=$Value.($pair[0]);if($hash-isnot[string]-or$hash-cnotmatch'^[A-Fa-f0-9]{64}$'-or$hash.ToUpperInvariant()-cne$Binding.facts.($pair[1])){throw 'Application facts stage differs from the external measured bytes.'}}
+        if(($Value.bytes-isnot[int]-and$Value.bytes-isnot[long])-or$Value.bytes-ne$Binding.facts.executableBytes-or$Value.payloadBytesVerified-isnot[bool]-or-not$Value.payloadBytesVerified-or$Value.guestCompatibilityVerified-isnot[bool]-or$Value.guestCompatibilityVerified-or$Value.runtimeAccepted-isnot[bool]-or$Value.runtimeAccepted-or$Value.physicalHardwareAccepted-isnot[bool]-or$Value.physicalHardwareAccepted){throw 'Application facts byte/proof scope differs.'}
+    }else{
+        $wanted=$Binding.source.value.files
+        if($Value.files-isnot[pscustomobject]-or@($Value.files.PSObject.Properties).Count-ne@($wanted.PSObject.Properties).Count){throw 'Application source copy returned an incomplete source projection.'}
+        foreach($file in $wanted.PSObject.Properties){if($Value.files.($file.Name)-cne$file.Value){throw 'Application source copy differs from checked source bytes.'}}
     }
 }
