@@ -391,8 +391,11 @@ jobs:
               try:
                   result["toolchain"] = tool_metadata()
                   named = ordinary(archive_path, False)
+                  result["archivePathStat"] = dict(zip(("device", "inode", "size", "mtimeNs", "ctimeNs", "links"), identity(named)))
                   with open(archive_path, "rb") as stream:
-                      if identity(named) != identity(os.fstat(stream.fileno())):
+                      opened = os.fstat(stream.fileno())
+                      result["archiveHandleStat"] = dict(zip(("device", "inode", "size", "mtimeNs", "ctimeNs", "links"), identity(opened)))
+                      if identity(named) != identity(opened):
                           raise ValueError("archive identity changed before opening")
                       result.update(extract_stream(stream, destination, EXPECTED, lambda count, files, size: print("Node source extraction progress: members=%d files=%d bytes=%d" % (count, files, size), flush=True)))
                       if identity(named) != identity(ordinary(archive_path, False)):
@@ -421,7 +424,7 @@ jobs:
           $extractorBytes=[Text.UTF8Encoding]::new($false).GetBytes($extractorBody.Replace("`r`n","`n")+"`n")
           $extractorStream=[IO.File]::Open($extractorFile,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
           try{$extractorStream.Write($extractorBytes,0,$extractorBytes.Length)}finally{$extractorStream.Dispose()}
-          if((Hash $extractorFile)-cne'B71029EE161CCA2A510A5DB988BE5E042398809FA78B3C7DF909E5DA7797B682'){throw 'The embedded reviewed Python extractor differs.'}
+          if((Hash $extractorFile)-cne'9A390AEEFCDB62612438EF7299D97BF5A31F4EABFCE93682F617FF8FE7AC7454'){throw 'The embedded reviewed Python extractor differs.'}
           Write-Host ('Selected extraction Python: path='+$python+' SHA256='+(Hash $python)+' version='+$pythonText)
           $extractionText=Native $python @('-I','-B',$extractorFile,$archive,$work) -TimeoutSeconds 1200
           $extraction=($extractionText-split'\r?\n'|Select-Object -Last 1)|ConvertFrom-Json
