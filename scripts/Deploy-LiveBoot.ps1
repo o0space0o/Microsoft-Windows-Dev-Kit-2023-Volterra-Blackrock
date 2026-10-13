@@ -29,7 +29,7 @@ function CheckTarget{
 }
 try{
  $image=Get-Content -LiteralPath (Ordinary $ImageReceipt) -Raw|ConvertFrom-Json
- $canonical=Join-Path $workspace 'build\current\Microsoft Windows Dev Kit 2023 Volterra Blackrock.iso'
+ $canonical=Join-Path $workspace 'build\current\Microsoft Volterra.iso'
  $looseMedia=Join-Path $workspace 'build\current\Media';$wim=Join-Path $looseMedia 'Sources\boot.wim'
  if($image.kind-cne'volterraCurrentLiveImage'-or$image.iso-cne$canonical-or$image.wim-cne$wim-or$image.vmBootVerified-ne$true-or$image.credentialsIncluded-ne$false){throw 'The single current live image lacks bound VM boot evidence'}
  if((Get-FileHash -LiteralPath (Ordinary $canonical)).Hash-cne$image.isoSHA256-or(Get-FileHash -LiteralPath (Ordinary $wim)).Hash-cne$image.wimSHA256){throw 'The verified live image changed'}

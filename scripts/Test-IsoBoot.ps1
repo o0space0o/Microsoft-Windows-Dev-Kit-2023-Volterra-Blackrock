@@ -5,14 +5,16 @@ param(
     [ValidatePattern('\Adevelopment-[0-9]{3}\z')][string]$BuildName
 )
 $ErrorActionPreference = 'Stop'
-if(-not$BuildName-and$Phase-ne'Inspect'){throw 'Prepare and Stop require an explicit BuildName; only Inspect can select the pinned current media.'}
+if(-not$BuildName){throw 'The legacy VM test requires an explicit historical BuildName. Inspect current media with node scripts/Plan-IsoBoot.mjs.'}
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $node = Join-Path $workspace 'private\tools\node.exe'
 $plan = $null
 function Read-Plan([string]$SelectedPhase) {
-    $json = if($BuildName){& $node (Join-Path $PSScriptRoot 'Plan-IsoBoot.mjs') $BuildName $SelectedPhase}else{& $node (Join-Path $PSScriptRoot 'Plan-IsoBoot.mjs')}
+    $json = & $node (Join-Path $PSScriptRoot 'Plan-IsoBoot.mjs') $BuildName $SelectedPhase
     if ($LASTEXITCODE -ne 0) { throw 'Selected ISO test receipt/identity validation failed.' }
-    return ($json | ConvertFrom-Json)
+    $selection = $json | ConvertFrom-Json
+    if($selection.readOnly -or $selection.buildName -cne $BuildName -or $selection.buildName -cnotmatch '\Adevelopment-[0-9]{3}\z') { throw 'Current media cannot enter the legacy VM test.' }
+    return $selection
 }
 function Save($File,$Object,[bool]$NewFile=$false) {
     # Replace a directory entry rather than writing through an existing link.

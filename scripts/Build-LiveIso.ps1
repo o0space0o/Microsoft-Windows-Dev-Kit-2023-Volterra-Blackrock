@@ -6,13 +6,14 @@ param(
  [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$BaseSHA256,
  [Parameter(Mandatory)][string]$BaseMedia,
  [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$PreviousSeedSHA256,
- [Parameter(Mandatory)][string]$SandboxConsent
+ [Parameter(Mandatory)][string]$SandboxConsent,
+ [string]$LauncherReceipt
 )
 $ErrorActionPreference='Stop'; Import-Module Dism
 $workspace=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $current=Join-Path $workspace 'build\current'; $mount=Join-Path $current 'final-boot'
 $media=Join-Path $current 'Media'; $wim=Join-Path $media 'Sources\boot.wim'
-$iso=Join-Path $current 'Microsoft Windows Dev Kit 2023 Volterra Blackrock.iso'
+$iso=Join-Path $current 'Microsoft Volterra.iso'
 $node=Join-Path $workspace 'private\tools\node.exe'
 $env:VOLTERRA_GIT_PATH=Join-Path $workspace 'private\tools\git\cmd\git.exe'
 $mounted=$false; $ownedOutput=$false
@@ -56,6 +57,12 @@ try{
  if($LASTEXITCODE-ne0){throw 'Checked source overlay failed'}
  & $node (Join-Path $PSScriptRoot 'Stage-WindowsFacts.mjs') $SourceReceipt $workspace $mount verify > (Join-Path $current 'native-verification.json') 2> (Join-Path $current 'native-verification-error.txt')
  if($LASTEXITCODE-ne0){throw 'Source-bound native runtime verification failed'}
+ Progress 'Verifying the preserved native startup handoff'
+ $launcherArguments=@((Join-Path $PSScriptRoot 'Stage-VolterraLauncher.mjs'),$SourceReceipt,$workspace,$mount)
+ if($LauncherReceipt){$launcherArguments+=(Ordinary $LauncherReceipt)}
+ & $node @launcherArguments > (Join-Path $current 'native-launcher.json') 2> (Join-Path $current 'native-launcher-error.txt')
+ if($LASTEXITCODE-ne0){throw 'Source-bound startup handoff verification failed'}
+ $result.nativeLauncherReceiptSHA256=(Get-FileHash -LiteralPath (Join-Path $current 'native-launcher.json')).Hash
  $application=Join-Path $mount 'Volterra'; $seed=Ordinary (Join-Path $application 'private\live-seed.json')
  $policy=Join-Path $application 'private\bootstrap\sandbox-policy.json'
  [IO.File]::WriteAllText($policy,(@{version=1;kind='volterraSandboxPolicy';mode='unelevated';userApproved=$true;hostWindowsExcluded=$true}|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
