@@ -34,6 +34,15 @@ test('only the inspected SOFTWARE and supervisor identities admit each startup h
   }
 });
 
+test('the verified Hyper-V guest base still requires the preserved native supervisor', () => {
+  const serviced = 'fea1dee14992bdc1a1ac3d24505ef39385f348afc950be155b2f7aff95a139bf';
+  assert.equal(validateBaseHandoff(serviced, admitted.supervisorSHA256), 'originalNativeSupervisor');
+  for (const supervisor of [null, '0'.repeat(64), admitted.softwareSHA256]) {
+    assert.throws(() => validateBaseHandoff(serviced, supervisor), /unsupported/);
+  }
+  assert.throws(() => validateBaseHandoff('0' + serviced.slice(1), admitted.supervisorSHA256), /unsupported/);
+});
+
 test('launcher provenance binds both source files, the checked compiler and exact executable bytes', () => {
   const f = build();
   validateLauncherBuild(f.manifest, f.source, f.binary);

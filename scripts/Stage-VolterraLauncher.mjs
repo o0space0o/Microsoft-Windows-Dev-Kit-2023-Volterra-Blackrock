@@ -14,6 +14,9 @@ const compilerSHA256 = '7b8f98d3990acae9f0132fbc74937d7597529f5e9d9f28ce1e0b0be7
 // These read-only SOFTWARE identities admit the already inspected Winlogon
 // handoffs. A changed OS hive needs a separately reviewed base admission.
 const nativeSoftwareSHA256 = '182a8b1454b07dc0fd9b0a0e63b5ae8100670e6b8cb32e8e251297eed685d994';
+// The same native handoff after official 26100.9549 Hyper-V guest servicing.
+// Read-only guest verification confirmed Shell, EditionID and the supervisor.
+const guestSoftwareSHA256 = 'fea1dee14992bdc1a1ac3d24505ef39385f348afc950be155b2f7aff95a139bf';
 const commandSoftwareSHA256 = '8d8589c2bb2aa62aa498e0736fa9232121f100c94c2a2d255ca9bc58c5b6a956';
 const supervisorSHA256 = '488b67f8368d206dabcf36ea4d6bfe23fe13bbd887cea275840b2d577a1953d7';
 const validHash = value => typeof value === 'string' && /^[a-f\d]{64}$/i.test(value);
@@ -35,7 +38,7 @@ async function readFile(file, maximum) {
 }
 
 export function validateBaseHandoff(softwareHash, supervisorHash) {
-  if (softwareHash === nativeSoftwareSHA256 && supervisorHash === supervisorSHA256) return 'originalNativeSupervisor';
+  if ([nativeSoftwareSHA256, guestSoftwareSHA256].includes(softwareHash) && supervisorHash === supervisorSHA256) return 'originalNativeSupervisor';
   if (softwareHash === commandSoftwareSHA256 && supervisorHash === null) return 'commandShell';
   throw new Error('The image has an unsupported SOFTWARE hive or native supervisor handoff.');
 }
