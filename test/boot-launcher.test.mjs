@@ -4,7 +4,19 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseArguments, volumeIdentity, ownedPath, selectPersistentStorage, prepareBootPaths, writeLaunchEvidence } from '../scripts/Start-Volterra.mjs';
+import { parseArguments, volumeIdentity, ownedPath, selectPersistentStorage, prepareBootPaths, writeLaunchEvidence, waitForListening } from '../scripts/Start-Volterra.mjs';
+
+test('boot readiness allows complete retained-profile checks beyond the former one-minute cutoff',async()=>{
+ let now=0,cancelled=0;
+ await waitForListening(43123,()=>false,{clock:()=>now,sleep:async()=>{now+=1000;},request:async()=>{if(now<65000)throw new Error('Preparing');return {ok:true,body:{cancel:async()=>{cancelled++;}}};}});
+ assert.equal(now,65000);assert.equal(cancelled,1);
+});
+test('boot readiness still stops at its fixed deadline or a stopped helper',async()=>{
+ let now=0;
+ await assert.rejects(waitForListening(43123,()=>false,{clock:()=>now,sleep:async()=>{now+=1000;},request:async()=>{throw new Error('Unavailable');}}),/three minutes/);
+ assert.equal(now,180000);
+ await assert.rejects(waitForListening(43123,()=>true,{clock:()=>0,request:async()=>{throw new Error('Must not request after stop');}}),/exited/);
+});
 import { fixturePrivateState } from './fixture-private-state.mjs';
 
 const volume = '\\\\?\\Volume{741d77ce-a5ee-4544-a158-b62783007d27}\\';

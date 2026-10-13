@@ -125,17 +125,20 @@ async function reservePort(port) {
   await new Promise((resolve, reject) => socket.close(error => error ? reject(error) : resolve()));
 }
 
-async function waitForListening(port, stopped) {
-  const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline && !stopped()) {
+export async function waitForListening(port, stopped, {clock = Date.now, request = fetch, sleep = milliseconds => new Promise(resolve => setTimeout(resolve,milliseconds))} = {}) {
+  // A retained account/profile tree requires repeated complete native privacy
+  // checks. One refused attempt can consume its 20 s bound and is retried up
+  // to five times. Allow that refusal to surface instead of killing it at 60 s.
+  const deadline = clock() + 180_000;
+  while (clock() < deadline && !stopped()) {
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(2000), redirect: 'error' });
+      const response = await request(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(2000), redirect: 'error' });
       await response.body?.cancel();
       if (response.ok && !stopped()) return;
     } catch {}
-    await new Promise(resolve => setTimeout(resolve, 250));
+    await sleep(250);
   }
-  throw new Error(stopped() ? 'The helper exited before opening its workspace.' : 'The helper did not open its loopback workspace within one minute.');
+  throw new Error(stopped() ? 'The helper exited before opening its workspace.' : 'The helper did not open its loopback workspace within three minutes.');
 }
 
 async function runChild(command, arguments_, options = {}) {

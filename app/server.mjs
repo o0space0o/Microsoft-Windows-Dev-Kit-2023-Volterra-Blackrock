@@ -37,7 +37,11 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
   const readState = () => readStoredState(storageOptions), saveState = value => saveStoredState(value, storageOptions), readCredential = () => readStoredCredential(storageOptions);
   // Refuse before reading or replacing any saved state. Existing accounts and
   // profiles retain their chosen locations and are verified before native use.
+  const startupTick=Date.now();
+  const startupRecord=stage=>{if(autostart)process.stdout.write(`[startup] ${stage}; elapsed ${Date.now()-startupTick} ms\n`);};
+  startupRecord('Checking private storage');
   await checkState(true);
+  startupRecord('Loading saved workspace');
   const state = await readState();
   const defaultFolder = await fs.realpath(process.env.VOLTERRA_OS_ROOT || root);
   if (!state.selected || (process.env.VOLTERRA_OS_ROOT && state.selected !== defaultFolder)) {
@@ -45,7 +49,9 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     state.selected = defaultFolder;
   }
   if (process.env.VOLTERRA_OS_ROOT && state.autoContinueVision === undefined) state.autoContinueVision = true;
+  startupRecord('Saving workspace state');
   await saveState(state);
+  startupRecord('Workspace state ready');
   const clients = new Set(), journal = [], approvals = new Map();
   await fs.mkdir(stateDirectory, { recursive: true });
   const journalFile = path.join(stateDirectory, 'journal.jsonl');
@@ -376,7 +382,9 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
       response.end(JSON.stringify({ error: redact(error.message) }));
     }
   });
+  startupRecord('Opening local workspace');
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
+  startupRecord('Local workspace listening');
   origin = `http://127.0.0.1:${server.address().port}`;
   sessionCookieName = 'volterra_session_' + server.address().port;
   const config = await readAutomationConfig();
