@@ -102,7 +102,15 @@ export async function windowsPrivateState({ directory, volume = '', scope = 'sta
 
 export async function ensurePrivateState({ directory, volume = '', scope = 'state', create = false, root = applicationRoot, platform = process.platform, windows = windowsPrivateState } = {}) {
   if (!directory) throw refused();
-  if (platform === 'win32') return windows({ directory, volume, scope, create, root });
+  if (platform === 'win32') {
+    // Browser/database startup and atomic state writes can replace a child
+    // between metadata enumeration and inspection. Repeat the complete proof;
+    // never treat a refused attempt as verified or change an existing ACL.
+    for (let attempt = 0; ; attempt++) {
+      try { return await windows({ directory, volume, scope, create, root }); }
+      catch (error) { if (attempt === 4) throw error; await new Promise(resolve => setTimeout(resolve, 150)); }
+    }
+  }
   // POSIX tests/hosts use filesystem mode protection; this is never a Windows
   // DACL claim. Existing objects are observed rather than permission-reset.
   if (create) { try { await fs.mkdir(directory, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw refused(); } }

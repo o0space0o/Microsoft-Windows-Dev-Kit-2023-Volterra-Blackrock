@@ -4,7 +4,16 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
-import { inspectWindowsPrivateState, windowsPrivateState, readPrivateInput, managedAccountDirectory, privateStateNotice } from '../app/private-state.mjs';
+import { ensurePrivateState, inspectWindowsPrivateState, windowsPrivateState, readPrivateInput, managedAccountDirectory, privateStateNotice } from '../app/private-state.mjs';
+
+test('a transient Windows metadata refusal repeats the complete proof before admitting a writer',async()=>{
+  let calls=0;const verified={status:'private',windowsDACLVerified:true};
+  const result=await ensurePrivateState({directory:'C:\\VolterraState',platform:'win32',windows:async options=>{calls++;assert.equal(options.directory,'C:\\VolterraState');if(calls<3)throw new Error(privateStateNotice);return verified;}});
+  assert.equal(calls,3);assert.equal(result,verified);
+});
+test('a persistent Windows refusal remains blocked after bounded retries',async()=>{
+  let calls=0;await assert.rejects(ensurePrivateState({directory:'C:\\VolterraState',platform:'win32',windows:async()=>{calls++;throw new Error(privateStateNotice);}}),{message:privateStateNotice});assert.equal(calls,5);
+});
 
 const directory = 'C:\\VolterraState', volume = '\\\\?\\Volume{11111111-2222-3333-4444-555555555555}\\';
 const now = Date.parse('2026-10-12T08:00:00Z');
