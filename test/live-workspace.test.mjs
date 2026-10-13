@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import {createHash} from 'node:crypto';
-import {prepareLiveWorkspace,liveSeedPath} from '../app/live-workspace.mjs';
+import {prepareLiveWorkspace,liveSeedPath,hashLiveFile} from '../app/live-workspace.mjs';
 import {ownedPath} from '../scripts/Start-Volterra.mjs';
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex').toUpperCase();
 async function fixture(t) {
@@ -35,4 +35,19 @@ test('changed runtime bytes never become an existing live executable',async t=>{
 });
 test('linked source leaves cannot be seeded',async t=>{
  const f=await fixture(t);await fs.link(path.join(f.root,'app','server.mjs'),path.join(f.storageRoot,'linked-source'));await assert.rejects(prepareLiveWorkspace(f),/multiple links/);await assert.rejects(fs.access(path.join(f.storageRoot,'Volterra')),{code:'ENOENT'});
+});
+
+test('large live runtimes are hashed with bounded reads and no whole-file buffer',async t=>{
+ const f=await fixture(t),file=path.join(f.root,'private','tools','large-fixture.dat');
+ const bytes=64*1024*1024,writer=await fs.open(file,'wx');await writer.truncate(bytes);await writer.close();
+ const expected=createHash('sha256'),zero=Buffer.alloc(1024*1024);for(let i=0;i<64;i++)expected.update(zero);
+ let maximumRead=0,totalRead=0;
+ const io={open:async(...args)=>{const handle=await fs.open(...args);return {stat:options=>handle.stat(options),close:()=>handle.close(),read:async(buffer,offset,count,position)=>{maximumRead=Math.max(maximumRead,count);assert.ok(buffer.length<=1024*1024);const result=await handle.read(buffer,offset,count,position);totalRead+=result.bytesRead;return result;}};}};
+ assert.equal(await hashLiveFile(file,{io,guard:ownedPath}),expected.digest('hex').toUpperCase());assert.equal(totalRead,bytes);assert.equal(maximumRead,1024*1024);
+});
+
+test('live runtime hashing rejects changes during an opened-file read',async t=>{
+ const f=await fixture(t),file=path.join(f.root,'private','tools','node.exe');let changed=false;
+ const io={open:async(...args)=>{const handle=await fs.open(...args);return {stat:options=>handle.stat(options),close:()=>handle.close(),read:async(...readArgs)=>{const result=await handle.read(...readArgs);if(!changed){changed=true;await fs.appendFile(file,'Changed after read');}return result;}};}};
+ await assert.rejects(hashLiveFile(file,{io,guard:ownedPath}),/changed during verification/);
 });

@@ -6,6 +6,29 @@ import { allowedSource } from './source-policy.mjs';
 const repository = 'o0space0o/Microsoft-Windows-Dev-Kit-2023-Volterra-Blackrock';
 const hash = value => createHash('sha256').update(value).digest('hex').toUpperCase();
 const generated = new Set(['private/source-version.json','private/bootstrap/Apply-SourceUpdate.mjs','private/bootstrap/private-state.mjs','private/bootstrap/sandbox-policy.json']);
+
+// Runtime files can exceed hundreds of megabytes. Keep verification memory
+// independent of file size, including when reopening the persistent workspace.
+export async function hashLiveFile(file, {io = fs, guard} = {}) {
+  await guard?.(file);
+  const handle = await io.open(file,'r');
+  try {
+    const before = await handle.stat({bigint:true});
+    if(!before.isFile() || before.nlink !== 1n || before.size < 0n || before.size > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('Unsupported live runtime file.');
+    const digest = createHash('sha256'), buffer = Buffer.alloc(1024 * 1024);
+    let position = 0;
+    while(position < Number(before.size)) {
+      const count = Math.min(buffer.length,Number(before.size)-position);
+      const result = await handle.read(buffer,0,count,position);
+      if(!Number.isInteger(result.bytesRead) || result.bytesRead < 1 || result.bytesRead > count) throw new Error('Live runtime verification ended early.');
+      digest.update(buffer.subarray(0,result.bytesRead));position += result.bytesRead;
+    }
+    const after = await handle.stat({bigint:true});
+    if(!after.isFile() || ['dev','ino','size','nlink','birthtimeNs','ctimeNs','mtimeNs'].some(key => typeof before[key] !== 'bigint' || before[key] !== after[key])) throw new Error('Live runtime changed during verification.');
+    await guard?.(file);
+    return digest.digest('hex').toUpperCase();
+  } finally {await handle.close();}
+}
 export function liveSeedPath(file) {
   return typeof file === 'string' && !file.includes('\\') && !file.includes(':') && !file.startsWith('/') && !file.split('/').some(part => !part || part === '.' || part === '..')
     && !/(^|\/)(auth\.json|hosts\.yml|Cookies|Login Data|History)$/i.test(file)
@@ -34,7 +57,7 @@ export async function prepareLiveWorkspace({ root, storageRoot, guard, notify = 
     // runtime/bootstrap is compared here; startup applies its checked queue.
     for(const [file,expected] of entries.filter(([file]) => file.startsWith('private/tools/') || file.startsWith('private/bootstrap/'))) {
       const destination = path.join(target,file); await guard(destination);
-      if(hash(await fs.readFile(destination)) !== expected) throw new Error('A persistent live runtime differs from its verified image. Existing work is retained.');
+      if(await hashLiveFile(destination,{guard}) !== expected) throw new Error('A persistent live runtime differs from its verified image. Existing work is retained.');
     }
     return {applicationRoot:target,projectRoot:storageRoot,seeded:false};
   }
@@ -45,10 +68,10 @@ export async function prepareLiveWorkspace({ root, storageRoot, guard, notify = 
   // No existing project or account directory is deleted or replaced.
   for(const [file,expected] of entries) {
     const source = path.join(root,file); await guard(source);
-    if(hash(await fs.readFile(source)) !== expected) throw new Error('The live source differs from its image manifest.');
+    if(await hashLiveFile(source,{guard}) !== expected) throw new Error('The live source differs from its image manifest.');
     const destination = path.join(temporary,file); await fs.mkdir(path.dirname(destination),{recursive:true});
     await guard(path.dirname(destination),'directory'); await fs.copyFile(source,destination); await guard(destination);
-    if(hash(await fs.readFile(destination)) !== expected) throw new Error('Persistent live workspace readback differs.');
+    if(await hashLiveFile(destination,{guard}) !== expected) throw new Error('Persistent live workspace readback differs.');
   }
   await fs.writeFile(path.join(temporary,'private','live-origin.json'),JSON.stringify(origin),{flag:'wx',flush:true});
   await guard(storageRoot,'directory');
