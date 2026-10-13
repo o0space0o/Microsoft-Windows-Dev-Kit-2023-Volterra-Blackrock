@@ -91,7 +91,7 @@ try{
  $tool='C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\arm64\Oscdimg\oscdimg.exe'
  $efi=Join-Path (Split-Path $tool) 'efisys_noprompt.bin'
  Progress 'Creating Microsoft Volterra live ISO'
- & $tool -m -o -u2 -udfver102 -lBLACKROCK "-bootdata:1#pEF,e,b$efi" $media $iso *> (Join-Path $current 'iso.log')
+ & $tool -m -o -u2 -udfver102 -lVOLTERRA "-bootdata:1#pEF,e,b$efi" $media $iso *> (Join-Path $current 'iso.log')
  if($LASTEXITCODE-ne0){throw 'Live ISO creation failed'}
  $result.status='created; boot verification pending';$result.sourceCommit=$source.commit;$result.wim=$wim;$result.wimSHA256=(Get-FileHash -LiteralPath $wim).Hash;$result.iso=$iso;$result.isoSHA256=(Get-FileHash -LiteralPath $iso).Hash;$result.isoBytes=(Get-Item -LiteralPath $iso).Length
  Progress $result.status

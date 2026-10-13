@@ -61,6 +61,51 @@ test('RAM boot refuses absent or ambiguous markers and network storage identity'
   await assert.rejects(selectPersistentStorage({ systemRoot: f.systemRoot, roots: [f.persistent], readVolume: async () => '\\\\server\\share' }), /local Windows volume/);
 });
 
+test('an inaccessible unobserved volume does not cancel the one accessible persistent marker', async t => {
+  const f = await fixture(t), unavailable = path.join(f.directory, 'protected-Windows-volume');
+  const inaccessibleMarker = path.join(unavailable, 'Volterra-persistent.tag'), originalLstat = fs.lstat;
+  let code = 'EPERM';
+  t.mock.method(fs, 'lstat', async (target, ...args) => {
+    if (target === inaccessibleMarker) throw Object.assign(new Error('Fixture volume is inaccessible.'), { code });
+    return originalLstat(target, ...args);
+  });
+  const queried = [], readVolume = async root => { queried.push(root); return volume; };
+  for (code of ['EPERM', 'EACCES']) {
+    for (const roots of [[f.persistent, unavailable], [unavailable, f.persistent]]) {
+      const selected = await selectPersistentStorage({ systemRoot: f.systemRoot, roots, readVolume });
+      assert.equal(selected.root, f.persistent);
+    }
+    await assert.rejects(selectPersistentStorage({ systemRoot: f.systemRoot, roots: [unavailable], readVolume }), /No marked/);
+  }
+  assert.deepEqual(queried, Array(4).fill(f.persistent));
+  const second = path.join(f.directory, 'second'); await fs.mkdir(second); await fs.writeFile(path.join(second, 'Volterra-persistent.tag'), 'Second');
+  await assert.rejects(selectPersistentStorage({ systemRoot: f.systemRoot, roots: [f.persistent, unavailable, second], readVolume }), /Multiple marked/);
+  code = 'EIO';
+  await assert.rejects(selectPersistentStorage({ systemRoot: f.systemRoot, roots: [f.persistent, unavailable], readVolume }), { code: 'EIO' });
+});
+
+test('access failures after observing a marker still stop startup before state creation', async t => {
+  const f = await fixture(t), marker = path.join(f.persistent, 'Volterra-persistent.tag'), originalLstat = fs.lstat;
+  let observed = 0, guardCode = 'EPERM';
+  t.mock.method(fs, 'lstat', async (target, ...args) => {
+    if (target === marker && ++observed > 1 && guardCode) throw Object.assign(new Error('Fixture marker guard failed.'), { code: guardCode });
+    return originalLstat(target, ...args);
+  });
+  let privacyCalled = false;
+  const options = { ...f, edition: 'WinVOS', ramdisk: true, roots: [f.persistent], readVolume: async () => volume,
+    privacy: async () => { privacyCalled = true; } };
+  for (guardCode of ['EPERM', 'EACCES', 'ENOENT']) {
+    observed = 0;
+    await assert.rejects(prepareBootPaths(options), { code: guardCode });
+  }
+  guardCode = null;
+  for (const code of ['EPERM', 'EACCES', 'ENOENT']) {
+    await assert.rejects(prepareBootPaths({ ...options, readVolume: async () => { throw Object.assign(new Error('Fixture volume identity failed.'), { code }); } }), { code });
+  }
+  assert.equal(privacyCalled, false);
+  await assert.rejects(fs.access(path.join(f.persistent, 'VolterraState')), { code: 'ENOENT' });
+});
+
 test('redirected state directories and linked markers cannot receive writes', async t => {
   const f = await fixture(t); const external = path.join(f.directory, 'external'); await fs.mkdir(external);
   await fs.symlink(external, path.join(f.persistent, 'VolterraState'), process.platform === 'win32' ? 'junction' : 'dir');

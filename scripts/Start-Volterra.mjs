@@ -66,12 +66,17 @@ export async function selectPersistentStorage({ systemRoot, roots, readVolume })
   for (const root of roots) {
     if (samePath(root, systemRoot)) continue;
     const marker = path.join(root, 'Volterra-persistent.tag');
-    try {
-      await ownedPath(marker);
-      const stat = await fs.stat(marker);
-      if (stat.size < 1 || stat.size > 1024) throw new Error('The persistent volume marker is invalid.');
-      candidates.push({ root: await ownedPath(root, 'directory'), volume: volumeIdentity(await readVolume(root)) });
-    } catch (error) { if (error.code !== 'ENOENT' && error.code !== 'ENODEV' && error.code !== 'ENXIO') throw error; }
+    // A protected, unrelated volume can deny even the marker existence probe.
+    // Once a marker is observed, every ownership and volume check must succeed.
+    try { await fs.lstat(marker); }
+    catch (error) {
+      if (['ENOENT', 'ENODEV', 'ENXIO', 'EACCES', 'EPERM'].includes(error.code)) continue;
+      throw error;
+    }
+    await ownedPath(marker);
+    const stat = await fs.stat(marker);
+    if (stat.size < 1 || stat.size > 1024) throw new Error('The persistent volume marker is invalid.');
+    candidates.push({ root: await ownedPath(root, 'directory'), volume: volumeIdentity(await readVolume(root)) });
   }
   if (candidates.length !== 1) throw new Error(candidates.length ? 'Multiple marked persistent volumes were found. Automatic startup cannot choose safely.' : 'No marked persistent volume was found. The image needs its prepared persistent disk before automatic startup.');
   return candidates[0];
