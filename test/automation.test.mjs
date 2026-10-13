@@ -188,6 +188,8 @@ test('diverged main is retained and remote updates require a review before stagi
 test('public source policy excludes OS files, runtimes, auth files and traversal', () => {
   for (const file of ['Windows/System32/kernel.dll', 'private/tools/node.exe', 'app/auth.json', '../README.md', 'app/../../Windows/x.ps1', 'scripts/drivers.cat']) assert.equal(allowedSource(file), false, file);
   assert.equal(allowedSource('app/auth.mjs'), true);
+  assert.equal(allowedSource('scripts/Boot-VolterraGuard.cpp'), true);
+  assert.equal(allowedSource('scripts/UnreviewedBootTool.cpp'), false);
 });
 const digest = content => createHash('sha256').update(content).digest('hex');
 async function updateFixture(name) {
