@@ -68,6 +68,10 @@ try{
   foreach($entry in Get-ChildItem -LiteralPath $resolved -Force -Recurse){Ordinary $entry.FullName|Out-Null}
   Remove-Item -LiteralPath $resolved -Recurse -Force
  }
+ Progress 'Checking the live image driver policy'
+ & $node (Join-Path $PSScriptRoot 'Check-ImageDrivers.mjs') $mount > (Join-Path $current 'driver-policy.json') 2> (Join-Path $current 'driver-policy-error.txt')
+ if($LASTEXITCODE-ne0){throw 'The image driver policy failed; no driver was removed automatically'}
+ $result.driverPolicySHA256=(Get-FileHash -LiteralPath (Join-Path $current 'driver-policy.json')).Hash
  Progress 'Sealing credential-free persistent workspace'
  & $node (Join-Path $PSScriptRoot 'Seal-LiveSeed.mjs') $mount $source.commit > (Join-Path $current 'seed-receipt.json') 2> (Join-Path $current 'seed-error.txt')
  if($LASTEXITCODE-ne0){throw 'Live workspace sealing failed'}

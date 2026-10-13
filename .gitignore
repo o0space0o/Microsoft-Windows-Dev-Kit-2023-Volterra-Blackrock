@@ -1,5 +1,6 @@
 /build/
 /private/
+/.codex-remote-attachments/
 /*.iso
 /*.wim
 /*.vhdx

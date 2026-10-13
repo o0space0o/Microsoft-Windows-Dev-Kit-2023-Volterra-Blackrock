@@ -6,7 +6,7 @@ const directory = process.argv[2] || process.cwd();
 async function collect(folder, prefix = '') {
   const files = [];
   for (const item of await fs.readdir(folder, { withFileTypes: true })) {
-    if (['.git', 'private', 'build', 'node_modules'].includes(item.name)) continue;
+    if (['.git', 'private', 'build', 'node_modules', '.codex-remote-attachments'].includes(item.name)) continue;
     const file = prefix + item.name;
     if (item.isDirectory()) files.push(...await collect(path.join(folder, item.name), file + '/'));
     else files.push(file);
