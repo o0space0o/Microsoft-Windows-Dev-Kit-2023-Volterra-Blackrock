@@ -19,6 +19,14 @@ $result=[ordered]@{version=1;kind='volterraCurrentLiveImage';status='checking';p
 function Progress([string]$message){[IO.File]::WriteAllText((Join-Path $current 'progress.txt'),$message)}
 function Ordinary([string]$target){
  $resolved=(Resolve-Path -LiteralPath $target).Path
+ # WIM-backed files can carry provider reparse attributes without being links.
+ # The owned JS guard checks real paths, entry types and link counts instead.
+ if($mounted-and($resolved-eq$mount-or$resolved.StartsWith($mount+'\',[StringComparison]::OrdinalIgnoreCase))){
+  $module=([uri](Join-Path $PSScriptRoot 'Start-Volterra.mjs')).AbsoluteUri
+  & $node --input-type=module -e "import fs from 'node:fs/promises';const m=await import(process.argv[1]);const p=process.argv[2];await m.ownedPath(p,(await fs.lstat(p)).isDirectory()?'directory':'file');" $module $resolved
+  if($LASTEXITCODE-ne0){throw ('An image path is redirected or not ordinary: '+$resolved)}
+  return $resolved
+ }
  for($cursor=$resolved;$cursor;$cursor=Split-Path $cursor){if((Get-Item -LiteralPath $cursor -Force).Attributes-band[IO.FileAttributes]::ReparsePoint){throw 'A build path is redirected'};if($cursor-eq[IO.Path]::GetPathRoot($cursor)){break}}
  return $resolved
 }
