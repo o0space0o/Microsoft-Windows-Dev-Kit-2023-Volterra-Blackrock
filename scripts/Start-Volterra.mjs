@@ -159,9 +159,17 @@ export async function launch(options) {
     const editionOutput = await nativeOutput(reg, ['query', 'HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion', '/v', 'EditionID'], env);
     const edition = /^\s*EditionID\s+REG_SZ\s+(\S+)\s*$/mi.exec(editionOutput)?.[1];
     const roots = Array.from({ length: 26 }, (_, index) => `${String.fromCharCode(65 + index)}:\\`);
-    boot = await prepareBootPaths({ root, systemRoot, ramdisk: env.SystemDrive.toUpperCase() === 'X:', edition, roots, readVolume: volume => nativeOutput(mountvol, [volume, '/L'], env) });
+    const ramdisk = env.SystemDrive.toUpperCase() === 'X:';
+    let live;
+    // The public, credential-free seed is checked against its sealed image
+    // hashes first. Private-state input handles are then verified on NTFS,
+    // rather than treating RAM-image file identities as persistent identities.
+    const bootPrivacy = ramdisk ? async options => {
+      live ||= await prepareLiveWorkspace({root,storageRoot:path.dirname(options.directory),guard:ownedPath,notify:console.log});
+      return ensurePrivateState({...options,root:live.applicationRoot});
+    } : ensurePrivateState;
+    boot = await prepareBootPaths({ root, systemRoot, ramdisk, edition, roots, privacy:bootPrivacy, readVolume: volume => nativeOutput(mountvol, [volume, '/L'], env) });
     if(boot.ramdisk) {
-      const live = await prepareLiveWorkspace({root,storageRoot:boot.storageRoot,guard:ownedPath,notify:console.log});
       root=live.applicationRoot; tools=path.join(root,'private','tools'); node=await ownedPath(path.join(tools,'node.exe'));
       codex=await ownedPath(path.join(tools,'codex.exe'));gh=await ownedPath(path.join(tools,'gh.exe'));git=await ownedPath(path.join(tools,'git','cmd','git.exe'));
       chrome=options.noBrowser?null:await ownedPath(path.join(tools,'chrome','chrome.exe'));boot.applicationRoot=root;
@@ -172,7 +180,7 @@ export async function launch(options) {
       }
     }
     Object.assign(env, { VOLTERRA_OS_ROOT: boot.projectRoot, VOLTERRA_STATE_DIR: boot.stateDirectory, VOLTERRA_STATE_VOLUME: boot.volume, CODEX_HOME: path.join(boot.stateDirectory, 'codex'), GH_CONFIG_DIR: path.join(boot.stateDirectory, 'github'), VOLTERRA_AUTOSTART: '1', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'safe.directory', GIT_CONFIG_VALUE_0: root });
-    await writeLaunchEvidence(boot.stateDirectory, { stage: 'Preparing', edition, ...boot, stateWritable: true, stateSurvivedRestart: false, sourceHealthConfirmed: false });
+    await writeLaunchEvidence(boot.stateDirectory, { stage: 'Preparing', edition, ...boot, stateWritable: true, stateSurvivedRestart: false, sourceHealthConfirmed: false }, {privacy:options=>ensurePrivateState({...options,root})});
     const updater = await ownedPath(path.join(root, 'private', 'bootstrap', 'Apply-SourceUpdate.mjs'));
     await runChild(node, [updater, boot.stateDirectory, root, 'apply', git], { cwd: root, env });
   }
@@ -196,7 +204,7 @@ export async function launch(options) {
   process.once('SIGINT', stop); process.once('SIGTERM', stop);
   try {
     await waitForListening(options.port, () => stopped);
-    if (boot) await writeLaunchEvidence(boot.stateDirectory, { stage: 'Listening', edition: 'WinVOS', ...boot, stateWritable: true, stateSurvivedRestart: false, helperPid: child.pid, helperListening: true, sourceHealthConfirmed: false });
+    if (boot) await writeLaunchEvidence(boot.stateDirectory, { stage: 'Listening', edition: 'WinVOS', ...boot, stateWritable: true, stateSurvivedRestart: false, helperPid: child.pid, helperListening: true, sourceHealthConfirmed: false }, {privacy:options=>ensurePrivateState({...options,root})});
     if (chrome) {
       env.VOLTERRA_BROWSER_STARTED_UTC = new Date().toISOString();
       const browser = spawn(chrome, ['--no-first-run', '--start-fullscreen', `--user-data-dir=${env.VOLTERRA_BROWSER_PROFILE}`, `--app=http://127.0.0.1:${options.port}/?screen=connections`], { cwd: root, env, windowsHide: false, stdio: 'ignore' });
@@ -217,10 +225,10 @@ export async function launch(options) {
       } catch (error) { if (error.code !== 'ENOENT') throw error; console.log('The native runtime verifier is unavailable. Source health and runtime acceptance remain pending.'); }
     }
     exitCode = await closed;
-    if (boot) await writeLaunchEvidence(boot.stateDirectory, { stage: 'Stopped', edition: 'WinVOS', ...boot, stateWritable: true, stateSurvivedRestart: false, helperExitCode: exitCode, sourceHealthConfirmed: false });
+    if (boot) await writeLaunchEvidence(boot.stateDirectory, { stage: 'Stopped', edition: 'WinVOS', ...boot, stateWritable: true, stateSurvivedRestart: false, helperExitCode: exitCode, sourceHealthConfirmed: false }, {privacy:options=>ensurePrivateState({...options,root})});
     return exitCode === 0 ? 0 : 1;
   } catch (error) {
-    if (boot) await writeLaunchEvidence(boot.stateDirectory, { stage: 'Failed', edition: 'WinVOS', ...boot, stateWritable: true, stateSurvivedRestart: false, helperExitCode: exitCode ?? null, sourceHealthConfirmed: false });
+    if (boot) await writeLaunchEvidence(boot.stateDirectory, { stage: 'Failed', edition: 'WinVOS', ...boot, stateWritable: true, stateSurvivedRestart: false, helperExitCode: exitCode ?? null, sourceHealthConfirmed: false }, {privacy:options=>ensurePrivateState({...options,root})});
     throw error;
   } finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); if (!stopped) child.kill(); }
 }
