@@ -1,6 +1,7 @@
 import { describeProgress, duration, noticeText, messageText } from './progress.js';
 const $ = value => document.querySelector(value);
 const token = $('meta[name="volterra-session"]').content;
+const runtimeProbe = new URLSearchParams(location.search).get('runtimeProbe') === '1';
 let state, screen = 'desktop', connected = true, phase = '', phaseSince = Date.now(), lastActivity = null, replaying = false;
 let pending = null, answers = {}, answerIndex = 0;
 const messages = new Map(), loginStarted = { chatgpt: false, github: false }, reported = new Set();
@@ -89,9 +90,9 @@ function render(value) {
   renderQuestion(value); updateClock();
   const problem = value.automation?.lastError;
   if (problem && !reported.has(problem)) { reported.add(problem); append('notice', problem); }
-  if (value.automation?.enabled && value.runtimeReady && !value.account && !loginStarted.chatgpt) {
+  if (!runtimeProbe && value.automation?.enabled && value.runtimeReady && !value.account && !loginStarted.chatgpt) {
     loginStarted.chatgpt = true; safe(() => action('codex/sign-in'));
-  } else if (value.automation?.enabled && value.connectionsChecked && value.account && !value.github?.login && !value.github?.userCode && !loginStarted.github) {
+  } else if (!runtimeProbe && value.automation?.enabled && value.connectionsChecked && value.account && !value.github?.login && !value.github?.userCode && !loginStarted.github) {
     loginStarted.github = true; safe(() => action('github/sign-in'));
   }
 }

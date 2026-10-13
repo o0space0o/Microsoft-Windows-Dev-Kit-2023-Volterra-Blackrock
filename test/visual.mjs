@@ -3,6 +3,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { createRequire } from 'node:module';
 import { fixturePrivateState } from './fixture-private-state.mjs';
+import assert from 'node:assert/strict';
+import { renderBrowser } from '../app/browser-probe.mjs';
 
 const require = createRequire(import.meta.url);
 const moduleRoot = process.env.VOLTERRA_TEST_MODULES;
@@ -14,6 +16,7 @@ process.env.VOLTERRA_STATE_DIR = path.join(temporary, 'state');
 process.env.CODEX_HOME = path.join(temporary, 'state', 'codex');
 process.env.GH_CONFIG_DIR = path.join(temporary, 'state', 'github');
 delete process.env.VOLTERRA_OS_ROOT;
+const { inspectBrowserCapture } = await import('../app/runtime-verification.mjs');
 const { createApplication } = await import('../app/server.mjs');
 // This compares rendered artwork only. Private-storage and native-runtime
 // acceptance have separate tests; never use a real account for a visual fixture.
@@ -38,6 +41,23 @@ try {
   await page.keyboard.press('Control+Backquote');
   await page.locator('#workspace').waitFor({ state: 'visible' });
   await page.screenshot({ path: 'build/verification/live-panel.png' });
+  let signInRequests = 0;
+  await page.route('**/api/state', route => route.fulfill({ json: { ...application.snapshot(), runtimeReady: true, account: null, automation: { enabled: true, phase: 'waiting-for-sign-in' } } }));
+  await page.route('**/api/codex/sign-in', route => { signInRequests++; return route.fulfill({ json: { status: 'Fixture only' } }); });
+  await page.goto(application.origin + '/?runtimeProbe=1'); await page.waitForFunction(() => !!window.volterraNavigate);
+  assert.equal(signInRequests, 0, 'A render probe must not start account authorization.');
+  await page.goto(application.origin); await page.waitForFunction(() => !!window.volterraNavigate);
+  assert.equal(signInRequests, 1, 'The normal workspace still starts browser authorization.');
+  const profile = path.join(temporary, 'render-profile'); await fs.mkdir(profile);
+  const capture = path.join(profile, 'render.png');
+  const guard = async file => {
+    const relative = path.relative(temporary, file); assert.ok(relative && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative));
+    try { const info = await fs.lstat(file); assert.equal(info.isSymbolicLink(), false); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  };
+  const render = await renderBrowser({ executable: 'C:/Program Files/Google/Chrome/Application/chrome.exe', profile, capture, url: application.origin + '/?runtimeProbe=1', guard });
+  assert.equal(inspectBrowserCapture(render.stdout, await fs.readFile(capture)).helperScriptExecuted, true);
+  const rendered = PNG.sync.read(await fs.readFile(capture)); assert.equal(rendered.width, 1672); assert.equal(rendered.height, 941);
+  report.protocolRenderPassed = true; report.probeSignInSuppressed = true;
   await fs.writeFile('build/verification/visual-report.json', JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   if (errors.length || Object.values(report.screens).some(value => value.differentPixels)) process.exitCode = 1;

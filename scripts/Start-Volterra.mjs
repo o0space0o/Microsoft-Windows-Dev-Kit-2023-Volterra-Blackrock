@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { ensurePrivateState } from '../app/private-state.mjs';
 import { prepareLiveWorkspace } from '../app/live-workspace.mjs';
+import { readSandboxPolicy } from '../app/sandbox-policy.mjs';
 
 const execute = promisify(execFile);
 const samePath = (left, right) => path.relative(path.resolve(left), path.resolve(right)) === '';
@@ -173,6 +174,7 @@ export async function launch(options) {
       root=live.applicationRoot; tools=path.join(root,'private','tools'); node=await ownedPath(path.join(tools,'node.exe'));
       codex=await ownedPath(path.join(tools,'codex.exe'));gh=await ownedPath(path.join(tools,'gh.exe'));git=await ownedPath(path.join(tools,'git','cmd','git.exe'));
       chrome=options.noBrowser?null:await ownedPath(path.join(tools,'chrome','chrome.exe'));boot.applicationRoot=root;
+      env.VOLTERRA_WINDOWS_SANDBOX = await readSandboxPolicy({ root, edition, ramdisk, guard: ownedPath });
       Object.assign(env,{VOLTERRA_CODEX_PATH:codex,VOLTERRA_GH_PATH:gh,VOLTERRA_GIT_PATH:git,PATH:`${path.dirname(git)};${tools};${process.env.PATH||''}`});
       for(const name of ['AGENTS.md','PROJECT_BRIEF.md']) {
         const destination=path.join(boot.projectRoot,name);

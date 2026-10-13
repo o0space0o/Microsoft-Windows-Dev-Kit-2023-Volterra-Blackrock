@@ -5,7 +5,8 @@ param(
  [Parameter(Mandatory)][string]$BaseBootWim,
  [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$BaseSHA256,
  [Parameter(Mandatory)][string]$BaseMedia,
- [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$PreviousSeedSHA256
+ [Parameter(Mandatory)][ValidatePattern('^[A-Fa-f0-9]{64}$')][string]$PreviousSeedSHA256,
+ [Parameter(Mandatory)][string]$SandboxConsent
 )
 $ErrorActionPreference='Stop'; Import-Module Dism
 $workspace=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -37,6 +38,9 @@ try{
  if(-not(Test-Path -LiteralPath $buildRoot)){New-Item -ItemType Directory -Path $buildRoot|Out-Null}
  Ordinary $buildRoot|Out-Null
  $base=Ordinary $BaseBootWim; $baseMedia=Ordinary $BaseMedia; $SourceReceipt=Ordinary $SourceReceipt
+ $consent=Get-Content -LiteralPath (Ordinary $SandboxConsent) -Raw|ConvertFrom-Json
+ if($consent.version-ne1-or$consent.kind-cne'volterraProvisioningConsent'-or$consent.decision-cne'approved'-or$consent.nativeSandboxMode-cne'unelevated'-or$consent.scope-cne'Private Volterra Validation OS VM and Volterra OS startup only; Windows 11 excluded'){throw 'The compatible sandbox needs an explicit, private Volterra approval record'}
+ $result.nativeSandboxMode='unelevated';$result.sandboxConsentSHA256=(Get-FileHash -LiteralPath $SandboxConsent).Hash
  if((Get-FileHash -LiteralPath $base).Hash-cne$BaseSHA256.ToUpperInvariant()){throw 'Sealed base image differs'}
  if(Test-Path -LiteralPath $current){throw 'Current output already exists; preserve it until a replacement is verified'}
  New-Item -ItemType Directory -Path $current,$mount,(Split-Path $wim)|Out-Null
@@ -53,6 +57,8 @@ try{
  & $node (Join-Path $PSScriptRoot 'Stage-WindowsFacts.mjs') $SourceReceipt $workspace $mount verify > (Join-Path $current 'native-verification.json') 2> (Join-Path $current 'native-verification-error.txt')
  if($LASTEXITCODE-ne0){throw 'Source-bound native runtime verification failed'}
  $application=Join-Path $mount 'Volterra'; $seed=Ordinary (Join-Path $application 'private\live-seed.json')
+ $policy=Join-Path $application 'private\bootstrap\sandbox-policy.json'
+ [IO.File]::WriteAllText($policy,(@{version=1;kind='volterraSandboxPolicy';mode='unelevated';userApproved=$true;hostWindowsExcluded=$true}|ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
  if((Get-FileHash -LiteralPath $seed).Hash-cne$PreviousSeedSHA256.ToUpperInvariant()){throw 'Previous live seed differs'}
  Remove-Item -LiteralPath $seed
  $metrics=Join-Path $application 'private\tools\chrome\SetupMetrics'

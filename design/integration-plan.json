@@ -1,5 +1,5 @@
 {
-  "status": "Local prototype implemented. Existing Codex ChatGPT account and real host inference verified. Fresh browser consent, GitHub authorization and composed OS runtime remain unverified.",
+  "status": "Local browser authorization and host inference verified. Live VM overlay, official authorization page, distinct boot persistence and official unelevated sandbox command verified. Fresh guest sign-in, saved Codex thread reboot and physical hardware remain pending.",
   "preference": "Browser sign-in using the ChatGPT plan; do not require an OpenAI API key",
   "service_roles": {
     "GitHub": "Repository sync, review and released update packages",
@@ -30,12 +30,12 @@
     "require_granted_plan_scope": true,
     "identity_sign_in_alone_is_insufficient": true,
     "eligibility": "Eligible accounts and plan usage limits apply; verify after sign-in",
-    "credential_storage": "Per user, outside the repository and distributable ISO; use a supported secure store or tightly restricted local storage",
+    "credential_storage": "Outside the source repository and distributable ISO, under the protected persistent VolterraState directory; verify the native Windows DACL before account access.",
     "embedded_browser": "Do not assume supported; prototype official system-browser flow first",
     "device_code_fallback": "Available through Codex CLI/app-server managed authentication where supported; test before relying on it on Validation OS"
   },
   "project_workflow": [
-    "Automatically use the installed Validation OS root as the workspace; use this build project in the Windows host preview. Opening another project is optional.",
+    "Automatically use the prepared persistent volume root as the live OS workspace; the overlay source lives under Volterra and private account/history storage under VolterraState. Windows runs from the RAM boot image. Use this build project in the Windows host preview.",
     "Optionally connect a GitHub repository with an independently authorized GitHub integration.",
     "Associate the absolute folder path and Git metadata with a saved local Codex thread ID.",
     "Start and resume Codex work scoped to that folder; allowlist additional actions explicitly.",
@@ -63,5 +63,13 @@
     "https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations",
     "https://learn.chatgpt.com/docs/app-server",
     "https://docs.github.com/en/apps/creating-github-apps/writing-code-for-a-github-app/building-a-cli-with-a-github-app"
-  ]
+  ],
+  "windows_sandbox": {
+    "consent": "User approved the compatible fallback after its weaker network isolation was explained",
+    "mode": "unelevated",
+    "scope": "Verified live Validation OS only",
+    "mxc_result": "Native MXC unavailable in the actual guest",
+    "elevated_result": "Setup completed, but execution failed with error 1060; Secondary Logon absent",
+    "execution_gate": "Actual native read-only command before agent work; readiness alone is insufficient"
+  }
 }

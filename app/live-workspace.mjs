@@ -5,7 +5,7 @@ import { allowedSource } from './source-policy.mjs';
 
 const repository = 'o0space0o/Microsoft-Windows-Dev-Kit-2023-Volterra-Blackrock';
 const hash = value => createHash('sha256').update(value).digest('hex').toUpperCase();
-const generated = new Set(['private/source-version.json','private/bootstrap/Apply-SourceUpdate.mjs','private/bootstrap/private-state.mjs']);
+const generated = new Set(['private/source-version.json','private/bootstrap/Apply-SourceUpdate.mjs','private/bootstrap/private-state.mjs','private/bootstrap/sandbox-policy.json']);
 export function liveSeedPath(file) {
   return typeof file === 'string' && !file.includes('\\') && !file.includes(':') && !file.startsWith('/') && !file.split('/').some(part => !part || part === '.' || part === '..')
     && !/(^|\/)(auth\.json|hosts\.yml|Cookies|Login Data|History)$/i.test(file)

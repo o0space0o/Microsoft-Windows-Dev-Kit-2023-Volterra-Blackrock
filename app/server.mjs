@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { CodexBridge } from './codex.mjs';
+import { verifyNativeSandbox } from './sandbox-policy.mjs';
 import { ChatGPTSignIn } from './auth.mjs';
 import { root, executable, run, powershell, openBrowser, chooseFolder, redact } from './platform.mjs';
 import { readState as readStoredState, saveState as saveStoredState, projectPath, readCredential as readStoredCredential, stateDirectory } from './storage.mjs';
@@ -181,6 +182,7 @@ export async function createApplication({ port = Number(process.env.VOLTERRA_POR
     if (!state.authMode) throw new Error('Connect ChatGPT or your existing Codex account first.');
     await ensureRuntime();
     if (!account && state.authMode === 'codex') throw new Error('Sign in to Codex using ChatGPT before starting work.');
+    if (process.env.VOLTERRA_WINDOWS_SANDBOX === 'unelevated') await verifyNativeSandbox(codex, { cwd: project.path, command: [path.join(root, 'private/tools/node.exe'), '-p', 'require("node:os").release()'] });
     if (loadedThread === project.threadId && loadedThread) return project;
     const options = { cwd: project.path, sandbox: 'workspace-write', approvalPolicy: 'on-request' };
     let hostRestrictions = '';

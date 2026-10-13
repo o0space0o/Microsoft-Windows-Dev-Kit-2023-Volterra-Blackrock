@@ -8,6 +8,8 @@ import { redact } from '../app/platform.mjs';
 import { atomic } from '../app/storage.mjs';
 import { waitForHelperRuntime, probeCodexRuntime, probePersistentHistory, evaluateBootRuntime, inspectBrowserCapture } from '../app/runtime-verification.mjs';
 import { readWindowsFacts } from '../app/windows-facts.mjs';
+import { renderBrowser } from '../app/browser-probe.mjs';
+import { ownedPath } from './Start-Volterra.mjs';
 
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -94,8 +96,8 @@ export async function verifyBootRuntime({ port = 43123, execute = runProbe } = {
       const profile = path.join(stateRoot, `runtime-browser-probe-${randomUUID()}`);
       await regularPath(profile, stateRoot); await fs.mkdir(profile); await regularPath(profile, stateRoot, { directory: true });
       const capture = path.join(profile, 'render.png');
-      const rendered = await execute(path.join(tools, 'chrome', 'chrome.exe'), ['--headless=new', '--no-first-run', '--window-size=1672,941', '--virtual-time-budget=5000', '--timeout=15000', `--user-data-dir=${profile}`, `--screenshot=${capture}`, '--dump-dom', `http://127.0.0.1:${port}/`], { timeoutMs: 20000 });
-      if (rendered.code !== 0) throw new Error(`The staged browser probe failed (${rendered.code}).`);
+      const executable = await ownedPath(path.join(tools, 'chrome', 'chrome.exe'));
+      const rendered = await renderBrowser({ executable, profile, capture, url: `http://127.0.0.1:${port}/?runtimeProbe=1`, guard: file => regularPath(file, stateRoot) });
       await regularPath(capture, stateRoot);
       Object.assign(result.browser, inspectBrowserCapture(rendered.stdout, await fs.readFile(capture)));
       result.browser.headlessExecutableRan = true;
