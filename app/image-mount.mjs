@@ -145,7 +145,7 @@ export async function validateOfflineImageMount({ workspace, mount, receiptFile,
   const root = await fs.realpath(workspace), mounted = await fs.realpath(mount);
   if (!samePath(workspace, root) || !samePath(mount, mounted)) throw new Error('An offline image workspace or mount is redirected.');
   const relative = path.relative(root, mounted).split(path.sep).join('/');
-  const ordinary = /^build\/development-[0-9]{3}\/final-(boot|install)$/.test(relative);
+  const ordinary = /^build\/(?:current|development-[0-9]{3})\/final-(boot|install)$/.test(relative);
   const candidate = /^build\/verification\/media-candidate-development-013-([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})\/final-(boot|install)$/.exec(relative);
   if (!ordinary && !candidate) throw new Error('Image payload target is not an exact owned offline build mount.');
   await checkedPath(root, mounted, true);

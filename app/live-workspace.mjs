@@ -9,6 +9,7 @@ const generated = new Set(['private/source-version.json','private/bootstrap/Appl
 export function liveSeedPath(file) {
   return typeof file === 'string' && !file.includes('\\') && !file.includes(':') && !file.startsWith('/') && !file.split('/').some(part => !part || part === '.' || part === '..')
     && !/(^|\/)(auth\.json|hosts\.yml|Cookies|Login Data|History)$/i.test(file)
+    && !/^private\/tools\/chrome\/SetupMetrics(?:\/|$)/i.test(file)
     && (allowedSource(file) || generated.has(file) || file.startsWith('private/tools/'));
 }
 

@@ -36,7 +36,7 @@ test('the actual shared boundary accepts both historical mounts and source-bound
   assert.equal(candidate.sourceReceiptSHA256, f.identity.sourceReceiptSHA256.toLowerCase());
   const install = path.join(f.artifactRoot, 'final-install'); await fs.mkdir(install);
   assert.equal((await validateOfflineImageMount({ ...f, mount: install })).candidate, true);
-  for (const relative of ['build/development-006/final-boot', 'build/development-013/final-install', 'build/development-900/final-boot']) {
+  for (const relative of ['build/current/final-boot', 'build/development-006/final-boot', 'build/development-013/final-install', 'build/development-900/final-boot']) {
     const mount = path.join(f.workspace, relative); await fs.mkdir(mount, { recursive: true });
     assert.equal((await validateOfflineImageMount({ ...f, mount })).candidate, false);
   }

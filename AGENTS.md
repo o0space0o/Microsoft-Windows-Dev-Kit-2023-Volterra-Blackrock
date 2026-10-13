@@ -1,6 +1,6 @@
 # Project instructions
 
-Keep development-013 as the single current OS version. Do not automatically create another numbered release or fall back to an older build. Retain required build dependencies and recovery copies until their replacements have been verified; cleanup must preserve project files and account history.
+Keep one current OS image in build/current, without numbered release folders. Retain required build dependencies and recovery copies until their replacements have been verified; cleanup must preserve project files and account history. Historical receipts do not select current media.
 
 The target is a live Validation OS RAM boot from A:, followed by the approved overlay. Automatically prepare its persistent system workspace and account/history storage on the marked drive; do not require folder setup or apply a conventional Windows installation onto A:. Preserve Windows 11 and its default boot selection.
 

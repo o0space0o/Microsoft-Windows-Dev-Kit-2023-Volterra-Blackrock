@@ -24,7 +24,7 @@ test('RAM overlay automatically seeds one persistent workspace and retains later
  const source=path.join(first.applicationRoot,'app','server.mjs');await fs.writeFile(source,'Saved project edit');const again=await prepareLiveWorkspace(f);assert.equal(again.seeded,false);assert.equal(await fs.readFile(source,'utf8'),'Saved project edit');assert.deepEqual(await fs.readdir(f.storageRoot),['Volterra']);
 });
 test('live seeding excludes account files and source escapes before writing',async t=>{
- const f=await fixture(t);for(const file of ['../outside','private/auth.json','private/tools/codex/auth.json','private/tools/chrome/Default/Cookies','private/tools/../auth.json'])assert.equal(liveSeedPath(file),false);
+ const f=await fixture(t);for(const file of ['../outside','private/auth.json','private/tools/codex/auth.json','private/tools/chrome/Default/Cookies','private/tools/chrome/SetupMetrics/fixture.pma','private/tools/../auth.json'])assert.equal(liveSeedPath(file),false);
  f.seed.files['private/auth.json']='A'.repeat(64);await f.save();await assert.rejects(prepareLiveWorkspace(f),/protected path/);assert.deepEqual(await fs.readdir(f.storageRoot),[]);
 });
 test('unrecognized existing project directories are retained',async t=>{

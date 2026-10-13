@@ -1,14 +1,23 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { createRequire } from 'node:module';
-import { createApplication } from '../app/server.mjs';
+import { fixturePrivateState } from './fixture-private-state.mjs';
 
 const require = createRequire(import.meta.url);
 const moduleRoot = process.env.VOLTERRA_TEST_MODULES;
 if (!moduleRoot) throw new Error('Set VOLTERRA_TEST_MODULES to the bundled Node package directory.');
 const { chromium } = require(require.resolve('playwright', { paths: [moduleRoot] }));
 const { PNG } = require(require.resolve('pngjs', { paths: [moduleRoot] }));
-const application = await createApplication({ port: 0 });
+const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'volterra-visual-'));
+process.env.VOLTERRA_STATE_DIR = path.join(temporary, 'state');
+process.env.CODEX_HOME = path.join(temporary, 'state', 'codex');
+process.env.GH_CONFIG_DIR = path.join(temporary, 'state', 'github');
+delete process.env.VOLTERRA_OS_ROOT;
+const { createApplication } = await import('../app/server.mjs');
+// This compares rendered artwork only. Private-storage and native-runtime
+// acceptance have separate tests; never use a real account for a visual fixture.
+const application = await createApplication({ port: 0, autostart: false, statePrivacy: fixturePrivateState(temporary), githubAccountReader: async () => { throw new Error('Visual fixture has no account.'); } });
 const browser = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true, args: ['--force-color-profile=srgb'] });
 try {
   const page = await browser.newPage({ viewport: { width: 1672, height: 941 }, deviceScaleFactor: 1 });
@@ -32,4 +41,8 @@ try {
   await fs.writeFile('build/verification/visual-report.json', JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   if (errors.length || Object.values(report.screens).some(value => value.differentPixels)) process.exitCode = 1;
-} finally { await browser.close(); await application.close(); }
+} finally {
+  await browser.close(); await application.close();
+  if (path.dirname(await fs.realpath(temporary)).toLowerCase() !== (await fs.realpath(os.tmpdir())).toLowerCase() || !path.basename(temporary).startsWith('volterra-visual-')) throw new Error('Visual fixture cleanup escaped temporary storage.');
+  await fs.rm(temporary, { recursive: true });
+}
