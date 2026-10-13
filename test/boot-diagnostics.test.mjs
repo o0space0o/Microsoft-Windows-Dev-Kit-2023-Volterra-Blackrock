@@ -105,3 +105,64 @@ test('excess directory entries cannot produce an unbounded snapshot', async t =>
   const capture = f.start(); assert.equal((await capture.flush()).status, 'unavailable');
   assert.deepEqual(await fs.readdir(f.stateDirectory), []);
 });
+
+// Model the measured Validation OS RAM provider without mounting an OS image.
+// Keep real ownedPath/privacy checks on the mapped fixture and all destinations.
+function ramMetadata(t, f, { ram = true, namedDev = 0n, handleDev = 3590983106n, replaceNamed = false, replaceHandle = false } = {}) {
+  const source = ram ? path.join('X:\\', 'Windows', 'Temp', 'VolterraLauncher') : f.source;
+  const isSource = file => file === source || path.dirname(file) === source;
+  const mapped = file => file === source ? f.source : isSource(file) ? path.join(f.source, path.basename(file)) : file;
+  const original = { lstat: fs.lstat.bind(fs), open: fs.open.bind(fs), opendir: fs.opendir.bind(fs) };
+  const inode = 9007199254740992n;
+  let namedCalls = 0;
+  t.mock.method(fs, 'opendir', (file, ...args) => original.opendir(mapped(file), ...args));
+  t.mock.method(fs, 'lstat', async (file, options) => {
+    const info = await original.lstat(mapped(file), options);
+    if (isSource(file) && file !== source && options?.bigint) {
+      info.dev = namedDev; info.ino = inode + (replaceNamed && ++namedCalls % 2 === 0 ? 1n : 0n);
+    }
+    return info;
+  });
+  t.mock.method(fs, 'open', async (file, ...args) => {
+    const handle = await original.open(mapped(file), ...args);
+    if (isSource(file) && file !== source) {
+      const originalStat = handle.stat.bind(handle);
+      let handleCalls = 0;
+      handle.stat = async options => {
+        const info = await originalStat(options);
+        if (options?.bigint) { info.dev = handleDev; info.ino = inode + (replaceHandle && ++handleCalls % 2 === 0 ? 1n : 0n); }
+        return info;
+      };
+    }
+    return handle;
+  });
+  return { boot: { ...f.options.boot, systemRoot: ram ? 'X:\\' : f.options.boot.systemRoot },
+    guard: async (file, kind) => { await ownedPath(mapped(file), kind); return file; } };
+}
+
+test('fixed X RAM logs allow only the measured zero named device and nonzero handle device', async t => {
+  const f = await fixture(t);
+  await fs.writeFile(path.join(f.source, 'launcher-42-10.log'), 'Native output');
+  const capture = f.start(ramMetadata(t, f));
+  assert.equal((await capture.flush()).status, 'captured');
+  assert.equal((await f.read()).logs[0].text, 'Native output');
+  assert.equal((await f.read()).systemRoot, 'X:\\');
+  await capture.stop();
+});
+
+for (const [label, settings] of [
+  ['outside the fixed X RAM source', { ram: false }],
+  ['with an unmeasured nonzero named device', { namedDev: 1n }],
+  ['with an unmeasured zero handle device', { namedDev: 1n, handleDev: 0n }],
+  ['when the named file changes by one exact 64-bit identity', { replaceNamed: true }],
+  ['when the open handle changes by one exact 64-bit identity', { replaceHandle: true }]
+]) test(`RAM metadata exception is refused ${label}`, async t => {
+  const f = await fixture(t);
+  await fs.writeFile(path.join(f.source, 'launcher-42-10.log'), 'Native output');
+  // Number-based stats would round these two distinct file IDs to the same ID.
+  assert.equal(Number(9007199254740992n), Number(9007199254740993n));
+  const capture = f.start(ramMetadata(t, f, settings));
+  assert.equal((await capture.flush()).status, 'unavailable');
+  assert.deepEqual(await fs.readdir(f.stateDirectory), []);
+  await capture.stop();
+});

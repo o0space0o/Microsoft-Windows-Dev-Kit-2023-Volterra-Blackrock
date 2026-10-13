@@ -8,27 +8,39 @@ const maximumFiles = 4, maximumTail = 65536, maximumEntries = 256, maximumSnapsh
 const snapshotName = 'native-launcher-logs.json', previousName = 'native-launcher-logs.previous.json';
 const same = (a, b) => path.relative(path.resolve(a), path.resolve(b)) === '';
 const within = (base, file) => { const relative = path.relative(base, file); return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)); };
-const sameFile = (a, b) => a.dev === b.dev && a.ino === b.ino && a.nlink === 1 && b.nlink === 1;
+const sameFile = (a, b) => ['dev', 'ino', 'birthtimeNs'].every(key => typeof a[key] === 'bigint' && a[key] === b[key]) && a.nlink === 1n && b.nlink === 1n;
+const ordinaryLog = info => info.isFile() && !info.isSymbolicLink() && info.nlink === 1n
+  && typeof info.size === 'bigint' && info.size >= 0n && info.size <= BigInt(Number.MAX_SAFE_INTEGER);
 
-async function tail(file, guard) {
+async function tail(file, guard, boot) {
+  // Only the fixed native log source from prepareBootPaths' verified WinVOS
+  // RAM boot admits differing device numbers between named and handle stats.
+  const ramLog = boot.ramdisk && /^X:\\$/i.test(boot.systemRoot)
+    && path.win32.dirname(file).toLowerCase() === 'x:\\windows\\temp\\volterralauncher'
+    && namePattern.test(path.win32.basename(file));
   await guard(file);
+  const namedBefore = await fs.lstat(file, { bigint: true });
   const handle = await fs.open(file, 'r');
   try {
-    const before = await handle.stat();
-    if (!before.isFile() || before.nlink !== 1 || !Number.isSafeInteger(before.size)) throw new Error('Unsupported launcher log.');
-    const offset = Math.max(0, before.size - maximumTail), bytes = Buffer.alloc(before.size - offset);
+    const before = await handle.stat({ bigint: true });
+    if (!ordinaryLog(before) || !ordinaryLog(namedBefore)) throw new Error('Unsupported launcher log.');
+    const sourceBytes = Number(before.size), offset = Math.max(0, sourceBytes - maximumTail), bytes = Buffer.alloc(sourceBytes - offset);
     let read = 0;
     while (read < bytes.length) {
       const result = await handle.read(bytes, read, bytes.length - read, offset + read);
       if (!result.bytesRead) break;
       read += result.bytesRead;
     }
-    const after = await handle.stat(), named = await fs.lstat(file);
+    const after = await handle.stat({ bigint: true }), namedAfter = await fs.lstat(file, { bigint: true });
     await guard(file);
-    // The native writer may append during a snapshot, but cannot replace or
-    // truncate its already observed content without invalidating this read.
-    if (read !== bytes.length || !sameFile(before, after) || !sameFile(after, named) || after.size < before.size || named.size < after.size) throw new Error('Launcher log changed identity.');
-    return { name: path.basename(file), sourceBytes: before.size, offset, text: bytes.toString('utf8') };
+    // The measured RAM provider reports lstat.dev=0 and a nonzero fstat.dev.
+    // Check each API against itself with exact 64-bit identities; preserve the
+    // cross-API check everywhere else. Appends are allowed, truncation is not.
+    const measuredRamMetadata = ramLog && namedBefore.dev === 0n && namedAfter.dev === 0n && before.dev > 0n && after.dev > 0n;
+    if (read !== bytes.length || !ordinaryLog(after) || !ordinaryLog(namedAfter)
+      || !sameFile(before, after) || !sameFile(namedBefore, namedAfter) || (!measuredRamMetadata && !sameFile(after, namedAfter))
+      || before.size < namedBefore.size || after.size < before.size || namedAfter.size < after.size) throw new Error('Launcher log changed identity.');
+    return { name: path.basename(file), sourceBytes, offset, text: bytes.toString('utf8') };
   } finally { await handle.close(); }
 }
 
@@ -57,7 +69,9 @@ export function startLauncherDiagnostics({ boot, root, guard, privacy = ensurePr
     if (!files.length) return { status: 'unavailable' };
     files.sort((a, b) => b.modified - a.modified || a.file.localeCompare(b.file));
     const logs = [];
-    for (const item of files.slice(0, maximumFiles)) logs.push(await tail(item.file, guard));
+    // Captured text is untrusted diagnostic content, never boot acceptance or
+    // authority to execute a command. Persistent input checks remain strict.
+    for (const item of files.slice(0, maximumFiles)) logs.push(await tail(item.file, guard, boot));
     await privacy({ directory: boot.stateDirectory, volume: boot.volume, scope: 'state', root });
     await guard(boot.stateDirectory, 'directory');
     async function write(name, bytes) {
