@@ -12,6 +12,8 @@ constexpr wchar_t applicationRoot[] = L"X:\\Volterra";
 constexpr wchar_t nodePath[] = L"X:\\Volterra\\private\\tools\\node.exe";
 constexpr wchar_t scriptPath[] = L"X:\\Volterra\\scripts\\Start-Volterra.mjs";
 HANDLE logFile = INVALID_HANDLE_VALUE;
+std::wstring ramLogPrefix;
+std::wstring childOutputPath;
 
 bool LiveEnvironment() {
     wchar_t directory[MAX_PATH] = {};
@@ -59,13 +61,100 @@ void OpenRamLog() {
     if (!OrdinaryPath(L"X:\\Windows\\Temp", true)) return;
     if (!CreateDirectoryW(directory.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return;
     if (!OrdinaryPath(directory, true)) return;
-    const std::wstring name = directory + L"\\launcher-" + std::to_wstring(GetCurrentProcessId()) +
-                              L"-" + std::to_wstring(GetTickCount64()) + L".log";
+    ramLogPrefix = directory + L"\\launcher-" + std::to_wstring(GetCurrentProcessId()) +
+                   L"-" + std::to_wstring(GetTickCount64());
+    const std::wstring name = ramLogPrefix + L".log";
     logFile = CreateFileW(name.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
                           CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
 }
 
+struct ChildCapture {
+    HANDLE output = INVALID_HANDLE_VALUE;
+    HANDLE input = INVALID_HANDLE_VALUE;
+    HANDLE inherited[2] = { INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE };
+    LPPROC_THREAD_ATTRIBUTE_LIST attributes = nullptr;
+    bool initialized = false;
+
+    ~ChildCapture() {
+        if (initialized) DeleteProcThreadAttributeList(attributes);
+        if (attributes) HeapFree(GetProcessHeap(), 0, attributes);
+        if (input != INVALID_HANDLE_VALUE) CloseHandle(input);
+        if (output != INVALID_HANDLE_VALUE) CloseHandle(output);
+    }
+
+    bool Prepare(STARTUPINFOEXW& startup) {
+        if (ramLogPrefix.empty()) { SetLastError(ERROR_PATH_NOT_FOUND); return false; }
+        childOutputPath = ramLogPrefix + L"-node.log";
+        SECURITY_ATTRIBUTES security = { sizeof(security), nullptr, TRUE };
+        output = CreateFileW(childOutputPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                             &security, CREATE_NEW,
+                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+        if (output == INVALID_HANDLE_VALUE) return false;
+        // No terminal input is needed: messages and questions use the overlay.
+        input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            &security, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (input == INVALID_HANDLE_VALUE) return false;
+        SIZE_T bytes = 0;
+        InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
+        if (!bytes || bytes > 65536) { SetLastError(ERROR_INVALID_DATA); return false; }
+        attributes = static_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(HeapAlloc(GetProcessHeap(), 0, bytes));
+        if (!attributes) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return false; }
+        if (!InitializeProcThreadAttributeList(attributes, 1, 0, &bytes)) return false;
+        initialized = true;
+        inherited[0] = output;
+        inherited[1] = input;
+        if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                       inherited, sizeof(inherited), nullptr, nullptr)) return false;
+        startup.StartupInfo.cb = sizeof(startup);
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = input;
+        startup.StartupInfo.hStdOutput = output;
+        startup.StartupInfo.hStdError = output;
+        startup.lpAttributeList = attributes;
+        return true;
+    }
+};
+
+std::wstring ChildOutputTail() {
+    if (childOutputPath.empty() || !OrdinaryPath(childOutputPath, false)) return L"No child output was captured.";
+    HANDLE file = CreateFileW(childOutputPath.c_str(), GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return L"The child output log could not be read.";
+    LARGE_INTEGER size = {};
+    char bytes[12000];
+    DWORD count = 0;
+    bool read = GetFileSizeEx(file, &size) != FALSE && size.QuadPart >= 0;
+    if (read) {
+        LARGE_INTEGER offset = {};
+        offset.QuadPart = size.QuadPart > static_cast<LONGLONG>(sizeof(bytes)) ? size.QuadPart - sizeof(bytes) : 0;
+        read = SetFilePointerEx(file, offset, nullptr, FILE_BEGIN) != FALSE &&
+               ReadFile(file, bytes, sizeof(bytes), &count, nullptr) != FALSE;
+    }
+    CloseHandle(file);
+    if (!read || !count) return L"No child output was captured.";
+    const int length = MultiByteToWideChar(CP_UTF8, 0, bytes, static_cast<int>(count), nullptr, 0);
+    if (length <= 0) return L"The child output log could not be decoded.";
+    std::wstring text(static_cast<size_t>(length), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, bytes, static_cast<int>(count), text.data(), length);
+    if (text.size() > 3000) text.erase(0, text.size() - 3000);
+    for (wchar_t& character : text) {
+        if (character < L' ' && character != L'\r' && character != L'\n' && character != L'\t') character = L' ';
+    }
+    return text;
+}
+
+void ShowFailure(DWORD code) {
+    const std::wstring message = L"The workspace could not start. Exit code: " + std::to_wstring(code) +
+        L"\r\n\r\nRAM log: " + (childOutputPath.empty() ? L"Unavailable" : childOutputPath) +
+        L"\r\n\r\nLast child output:\r\n" + ChildOutputTail() +
+        L"\r\n\r\nDismiss this message to return to the original startup supervisor.";
+    MessageBoxW(nullptr, message.c_str(), L"Microsoft Volterra startup stopped",
+                MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TASKMODAL);
+}
+
 int Finish(DWORD code) {
+    if (code) ShowFailure(code);
     Record("Launcher returning to the original startup supervisor", code);
     if (logFile != INVALID_HANDLE_VALUE) CloseHandle(logFile);
     return static_cast<int>(code);
@@ -89,11 +178,17 @@ int wmain(int argc, wchar_t**) {
     // Both executable and script are fixed absolute paths. No shell, environment
     // expansion, caller command line or inherited authorization argument is used.
     wchar_t command[] = L"\"X:\\Volterra\\private\\tools\\node.exe\" \"X:\\Volterra\\scripts\\Start-Volterra.mjs\" --boot";
-    STARTUPINFOW startup = {};
-    startup.cb = sizeof(startup);
+    STARTUPINFOEXW startup = {};
+    ChildCapture capture;
+    if (!capture.Prepare(startup)) {
+        const DWORD error = GetLastError();
+        Record("The RAM child-output capture could not be prepared", error);
+        return Finish(error ? error : ERROR_GEN_FAILURE);
+    }
     PROCESS_INFORMATION child = {};
-    if (!CreateProcessW(nodePath, command, nullptr, nullptr, FALSE, 0, nullptr,
-                        applicationRoot, &startup, &child)) {
+    // Only the explicit RAM log and NUL input handles cross this boundary.
+    if (!CreateProcessW(nodePath, command, nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT, nullptr,
+                        applicationRoot, &startup.StartupInfo, &child)) {
         const DWORD error = GetLastError();
         Record("Node startup failed", error);
         return Finish(error);
@@ -108,5 +203,6 @@ int wmain(int argc, wchar_t**) {
         Record("Could not collect the startup process exit", code);
     }
     CloseHandle(child.hProcess);
+    FlushFileBuffers(capture.output);
     return Finish(code);
 }

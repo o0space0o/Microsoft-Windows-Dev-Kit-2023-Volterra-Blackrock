@@ -61,7 +61,7 @@ foreach($file in @($target,$receipt,$log)){if(Test-Path -LiteralPath $file){thro
 $sourceSHA=Hash $source;$scriptSHA=Hash $PSCommandPath;$compilerSHA=Hash $compiler
 if(-not(Test-Path -LiteralPath $output)){New-Item -ItemType Directory -Path $output|Out-Null}
 Ordinary $output|Out-Null
-$arguments=@('-std=c++17','-O2','-static','-municode','-mconsole','-Wall','-Wextra','-Werror',$source,'-o',$target,'-ladvapi32')
+$arguments=@('-std=c++17','-O2','-static','-municode','-mconsole','-Wall','-Wextra','-Werror',$source,'-o',$target,'-ladvapi32','-luser32')
 $sourceLock=[IO.File]::Open($source,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
 try{& $compiler @arguments *> $log;$compileExit=$LASTEXITCODE}finally{$sourceLock.Dispose()}
 if($compileExit-ne0){throw "The native launcher did not compile; see $log"}
