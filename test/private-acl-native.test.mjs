@@ -22,7 +22,8 @@ internal static class PrivateAclFixture {
  }
  static void Add(RawSecurityDescriptor value,AceQualifier kind,int mask,string sid,bool callback=false) { value.DiscretionaryAcl.InsertAce(0,new CommonAce(AceFlags.None,kind,mask,new SecurityIdentifier(sid),callback,callback?new byte[0]:null)); }
  static int count;
- static void Check(bool directory,bool pass,Action<RawSecurityDescriptor> alter) { var value=Descriptor(directory);alter(value);bool accepted=false;try{PrivateWindowsState.PrivateAccess(value,Principals,directory,directory);accepted=true;}catch(InvalidOperationException){}if(accepted!=pass)throw new Exception("ACL fixture failed: "+count);count++; }
+ static void Remove(RawSecurityDescriptor value,string sid) { for(int i=0;i<value.DiscretionaryAcl.Count;i++){var ace=value.DiscretionaryAcl[i] as CommonAce;if(ace!=null&&ace.SecurityIdentifier.Value==sid){value.DiscretionaryAcl.RemoveAce(i);return;}}throw new Exception("Fixture SID absent"); }
+ static void Check(bool directory,bool pass,Action<RawSecurityDescriptor> alter,bool? root=null) { var value=Descriptor(directory);alter(value);bool accepted=false;try{PrivateWindowsState.PrivateAccess(value,Principals,directory,root.HasValue?root.Value:directory);accepted=true;}catch(InvalidOperationException){}if(accepted!=pass)throw new Exception("ACL fixture failed: "+count);count++; }
  static int Main() {
   Check(false,true,v=>{});
   Check(true,true,v=>{});
@@ -33,8 +34,14 @@ internal static class PrivateAclFixture {
   Check(false,false,v=>Add(v,AceQualifier.AccessDenied,0x20,World,true));
   Check(false,false,v=>Add(v,AceQualifier.AccessDenied,0x20,"S-1-5-32-545"));
   Check(false,false,v=>{Add(v,AceQualifier.AccessDenied,0x20,World);Add(v,AceQualifier.AccessDenied,0x20,World);});
-  Check(false,false,v=>v.DiscretionaryAcl.RemoveAce(0));
+  Check(false,false,v=>Remove(v,"S-1-5-18"));
   Check(false,false,v=>v.Owner=new SecurityIdentifier(World));
+  Check(false,true,v=>Remove(v,User));
+  Check(true,true,v=>Remove(v,User),false);
+  Check(true,false,v=>Remove(v,User));
+  Check(false,true,v=>{Remove(v,User);Add(v,AceQualifier.AccessDenied,0x20,World);});
+  Check(false,false,v=>{Remove(v,User);Add(v,AceQualifier.AccessAllowed,0x1,World);});
+  Check(false,false,v=>{Remove(v,User);Remove(v,"S-1-5-32-544");});
   Console.WriteLine("{\\\"passed\\\":"+count+"}");return 0;
  }
 }`;
@@ -48,7 +55,7 @@ test('native ACL checker accepts Chromium execution denial and rejects additiona
     await execute(compiler,['/nologo','/noconfig','/target:exe','/platform:anycpu',`/reference:${path.join(path.dirname(compiler),'System.dll')}`,`/reference:${path.join(path.dirname(compiler),'System.Core.dll')}`,`/out:${executable}`,source,fixtureSource],{windowsHide:true,timeout:20000});
     const result=await execute(executable,[],{windowsHide:true,timeout:5000});
     assert.equal(result.stderr,'');
-    assert.deepEqual(JSON.parse(result.stdout),{passed:11});
+    assert.deepEqual(JSON.parse(result.stdout),{passed:17});
   } finally {
     const absolute=path.resolve(directory);
     assert.equal(path.dirname(absolute).toLowerCase(),path.resolve(os.tmpdir()).toLowerCase());

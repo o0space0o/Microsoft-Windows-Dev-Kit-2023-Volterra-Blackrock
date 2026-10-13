@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { ensurePrivateState } from '../app/private-state.mjs';
+import { prepareLiveWorkspace } from '../app/live-workspace.mjs';
 
 const execute = promisify(execFile);
 const samePath = (left, right) => path.relative(path.resolve(left), path.resolve(right)) === '';
@@ -89,7 +90,7 @@ export async function prepareBootPaths({ root, systemRoot, ramdisk, edition, roo
   await fs.writeFile(witness, 'Persistent state write check', { flag: 'wx', mode: 0o600 });
   await ownedPath(witness);
   await fs.unlink(witness);
-  return { systemRoot, stateDirectory: directory, storageRoot: storage.root, volume: storage.volume, projectRootPersistent: !ramdisk };
+  return { systemRoot, projectRoot: storage.root, stateDirectory: directory, storageRoot: storage.root, volume: storage.volume, projectRootPersistent: true, ramdisk };
 }
 
 export async function writeLaunchEvidence(directory, value, { privacy = ensurePrivateState } = {}) {
@@ -138,14 +139,14 @@ async function runChild(command, arguments_, options = {}) {
 
 export async function launch(options) {
   if (process.platform !== 'win32' || process.arch !== 'arm64') throw new Error('This launcher requires the staged Windows ARM64 runtime.');
-  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-  const tools = path.join(root, 'private', 'tools');
-  const node = await ownedPath(path.join(tools, 'node.exe'));
+  let root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  let tools = path.join(root, 'private', 'tools');
+  let node = await ownedPath(path.join(tools, 'node.exe'));
   if (!samePath(process.execPath, node)) throw new Error('Start the helper with its staged Node runtime.');
-  const codex = await ownedPath(path.join(tools, 'codex.exe'));
-  const gh = await ownedPath(path.join(tools, 'gh.exe'));
-  const git = await ownedPath(path.join(tools, 'git', 'cmd', 'git.exe'));
-  const chrome = options.noBrowser ? null : await ownedPath(path.join(tools, 'chrome', 'chrome.exe'));
+  let codex = await ownedPath(path.join(tools, 'codex.exe'));
+  let gh = await ownedPath(path.join(tools, 'gh.exe'));
+  let git = await ownedPath(path.join(tools, 'git', 'cmd', 'git.exe'));
+  let chrome = options.noBrowser ? null : await ownedPath(path.join(tools, 'chrome', 'chrome.exe'));
   const env = { ...process.env, VOLTERRA_CODEX_PATH: codex, VOLTERRA_GH_PATH: gh, VOLTERRA_GIT_PATH: git, VOLTERRA_PORT: String(options.port), PATH: `${path.dirname(git)};${tools};${process.env.PATH || ''}` };
   delete env.VOLTERRA_BROWSER_PID;
   delete env.VOLTERRA_BROWSER_STARTED_UTC;
@@ -159,7 +160,18 @@ export async function launch(options) {
     const edition = /^\s*EditionID\s+REG_SZ\s+(\S+)\s*$/mi.exec(editionOutput)?.[1];
     const roots = Array.from({ length: 26 }, (_, index) => `${String.fromCharCode(65 + index)}:\\`);
     boot = await prepareBootPaths({ root, systemRoot, ramdisk: env.SystemDrive.toUpperCase() === 'X:', edition, roots, readVolume: volume => nativeOutput(mountvol, [volume, '/L'], env) });
-    Object.assign(env, { VOLTERRA_OS_ROOT: boot.systemRoot, VOLTERRA_STATE_DIR: boot.stateDirectory, VOLTERRA_STATE_VOLUME: boot.volume, CODEX_HOME: path.join(boot.stateDirectory, 'codex'), GH_CONFIG_DIR: path.join(boot.stateDirectory, 'github'), VOLTERRA_AUTOSTART: '1', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'safe.directory', GIT_CONFIG_VALUE_0: root });
+    if(boot.ramdisk) {
+      const live = await prepareLiveWorkspace({root,storageRoot:boot.storageRoot,guard:ownedPath,notify:console.log});
+      root=live.applicationRoot; tools=path.join(root,'private','tools'); node=await ownedPath(path.join(tools,'node.exe'));
+      codex=await ownedPath(path.join(tools,'codex.exe'));gh=await ownedPath(path.join(tools,'gh.exe'));git=await ownedPath(path.join(tools,'git','cmd','git.exe'));
+      chrome=options.noBrowser?null:await ownedPath(path.join(tools,'chrome','chrome.exe'));boot.applicationRoot=root;
+      Object.assign(env,{VOLTERRA_CODEX_PATH:codex,VOLTERRA_GH_PATH:gh,VOLTERRA_GIT_PATH:git,PATH:`${path.dirname(git)};${tools};${process.env.PATH||''}`});
+      for(const name of ['AGENTS.md','PROJECT_BRIEF.md']) {
+        const destination=path.join(boot.projectRoot,name);
+        try {await ownedPath(destination);} catch(error) {if(error.code!=='ENOENT')throw error;const source=await ownedPath(path.join(systemRoot,name));await fs.copyFile(source,destination,fs.constants.COPYFILE_EXCL);}
+      }
+    }
+    Object.assign(env, { VOLTERRA_OS_ROOT: boot.projectRoot, VOLTERRA_STATE_DIR: boot.stateDirectory, VOLTERRA_STATE_VOLUME: boot.volume, CODEX_HOME: path.join(boot.stateDirectory, 'codex'), GH_CONFIG_DIR: path.join(boot.stateDirectory, 'github'), VOLTERRA_AUTOSTART: '1', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'safe.directory', GIT_CONFIG_VALUE_0: root });
     await writeLaunchEvidence(boot.stateDirectory, { stage: 'Preparing', edition, ...boot, stateWritable: true, stateSurvivedRestart: false, sourceHealthConfirmed: false });
     const updater = await ownedPath(path.join(root, 'private', 'bootstrap', 'Apply-SourceUpdate.mjs'));
     await runChild(node, [updater, boot.stateDirectory, root, 'apply', git], { cwd: root, env });
@@ -175,7 +187,7 @@ export async function launch(options) {
   console.log(`Microsoft Volterra workspace: http://127.0.0.1:${options.port}`);
   console.log('Live progress appears in this terminal and in the workspace. Send messages or questions in its conversation.');
   console.log('ChatGPT and GitHub use separate official browser sign-ins. No API key is required.');
-  if (boot && !boot.projectRootPersistent) console.log('This ISO runs its OS root in RAM. Account state is on the marked disk; root project files still require installed-disk persistence verification.');
+  if (boot?.ramdisk) console.log('Validation OS runs in RAM. The live overlay, project files and account history use the prepared persistent drive.');
   const child = spawn(node, [server], { cwd: root, env, windowsHide: true, stdio: 'inherit' });
   let stopped = false, exitCode;
   const closed = new Promise((resolve, reject) => { child.once('error', error => { stopped = true; reject(error); }); child.once('close', code => { stopped = true; exitCode = code; resolve(code); }); });

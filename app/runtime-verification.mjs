@@ -137,7 +137,7 @@ export function evaluateBootRuntime(report) {
   const checks = {
     validationOS: report.edition === 'WinVOS',
     runtimeExecutables: report.versionsVerified === true,
-    automaticWorkspace: report.serverReady === true && typeof report.systemRoot === 'string' && typeof report.automaticWorkspace === 'string' && path.win32.normalize(report.automaticWorkspace).toLowerCase() === path.win32.normalize(report.systemRoot).toLowerCase(),
+    automaticWorkspace: report.serverReady === true && typeof (report.workspaceRoot || report.systemRoot) === 'string' && typeof report.automaticWorkspace === 'string' && path.win32.normalize(report.automaticWorkspace).toLowerCase() === path.win32.normalize(report.workspaceRoot || report.systemRoot).toLowerCase(),
     persistentHistory: report.history?.storageConfigured === true && report.history.historyReadable === true && report.history.survivedBoot === true && report.codexProtocol?.savedThreadReadable === true && typeof report.codexProtocol.savedThreadId === 'string' && report.codexProtocol.savedThreadId === report.historyContext?.project?.threadId,
     browser: report.browser?.executableMatched === true && report.browser.helperScriptExecuted === true && report.browser.renderCaptured === true,
     nativeCodexSandbox: report.helperRuntimeReady === true && report.helperRuntimeRunning === true && report.codexProtocol?.appServerInitialized === true && report.codexProtocol.nativeSandboxReady === true && report.codexProtocol.sandboxCommandCompleted === true,
@@ -146,7 +146,7 @@ export function evaluateBootRuntime(report) {
   const prerequisites = {
     validationOS: 'Run this verifier in the actually booted composed Validation OS; host preview and image receipts are insufficient.',
     runtimeExecutables: 'Successfully run the staged Node, Codex, GitHub CLI and Git executables on this OS.',
-    automaticWorkspace: 'Observe the live helper automatically selecting this OS root.',
+    automaticWorkspace: 'Observe the live helper automatically selecting the persistent system workspace configured by the boot launcher.',
     persistentHistory: 'Retain and read the same saved Codex thread and journal on persistent storage across a user-controlled reboot.',
     browser: 'Run the staged system browser against the helper and capture successful script execution and rendering.',
     nativeCodexSandbox: 'Observe native Codex sandbox readiness and successful read-only command execution on this OS.',

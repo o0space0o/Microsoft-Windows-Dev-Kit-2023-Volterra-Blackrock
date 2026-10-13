@@ -41,7 +41,7 @@ test('RAM boot chooses one marked writable volume and isolates state from OS sou
   const result = await prepareBootPaths({ ...f, ramdisk: true, edition: 'WinVOS', roots: [f.systemRoot, f.persistent, path.join(f.directory, 'missing')], readVolume: async root => { calls.push(root); return volume; } });
   assert.equal(result.systemRoot, f.systemRoot); assert.equal(result.storageRoot, f.persistent);
   assert.equal(result.stateDirectory, path.join(f.persistent, 'VolterraState'));
-  assert.equal(result.projectRootPersistent, false); assert.equal(result.volume, volume);
+  assert.equal(result.projectRootPersistent, true); assert.equal(result.projectRoot, f.persistent); assert.equal(result.ramdisk,true); assert.equal(result.volume, volume);
   assert.deepEqual(calls, [f.persistent]);
   assert.deepEqual((await fs.readdir(result.stateDirectory)).sort(), ['browser', 'codex', 'github']);
 });

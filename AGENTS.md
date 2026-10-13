@@ -2,6 +2,8 @@
 
 Keep development-013 as the single current OS version. Do not automatically create another numbered release or fall back to an older build. Retain required build dependencies and recovery copies until their replacements have been verified; cleanup must preserve project files and account history.
 
+The target is a live Validation OS RAM boot from A:, followed by the approved overlay. Automatically prepare its persistent system workspace and account/history storage on the marked drive; do not require folder setup or apply a conventional Windows installation onto A:. Preserve Windows 11 and its default boot selection.
+
 The user requires the approved space-themed interface to be reproduced without a visual redesign. The reference files and checksums are in design/approved-v1/visual-lock.json. Keep those image files byte-identical. Compare rendered implementation against these references at 1672 by 941 before claiming a match. Disclose unresolved visual differences. New screens need separate design references; never replace an approved reference without an explicit user request.
 
 Use sentence case in all interface labels and explanatory copy, preserving proper names and technical abbreviations. Keep the approved custom control treatment and organized system tools. Avoid conventional list and table views.

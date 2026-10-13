@@ -50,7 +50,7 @@ export async function verifyBootRuntime({ port = 43123, execute = runProbe } = {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Choose a valid local helper port.');
   const tools = path.join(sourceRoot, 'private', 'tools');
   const systemRoot = process.env.SystemRoot;
-  const result = { version: 2, status: 'running', edition: 'Unknown', architecture: process.arch, systemRoot: `${process.env.SystemDrive || ''}\\`, versions: {}, utc: new Date().toISOString(), errors: [], environment: 'OS identity unverified', bootIdentityObserved: false, history: { storageConfigured: false, historyReadable: false, survivedBoot: false }, browser: { executableMatched: false, helperScriptExecuted: false, renderCaptured: false } };
+  const result = { version: 2, status: 'running', edition: 'Unknown', architecture: process.arch, systemRoot: `${process.env.SystemDrive || ''}\\`, workspaceRoot:process.env.VOLTERRA_OS_ROOT, versions: {}, utc: new Date().toISOString(), errors: [], environment: 'OS identity unverified', bootIdentityObserved: false, history: { storageConfigured: false, historyReadable: false, survivedBoot: false }, browser: { executableMatched: false, helperScriptExecuted: false, renderCaptured: false } };
   let stateRoot, output;
   const save = async () => { if (output) { await regularPath(output, stateRoot); result.utc = new Date().toISOString(); await atomic(output, JSON.stringify(result, null, 2)); } };
   const evaluate = async () => {
