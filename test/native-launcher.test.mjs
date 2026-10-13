@@ -45,6 +45,15 @@ test('the verified Hyper-V guest base still requires the preserved native superv
   assert.throws(() => validateBaseHandoff('fea1dee14992bdc1a1ac3d24505ef39385f348afc950be155b2f7aff95a139bf', admitted.supervisorSHA256), /unsupported/);
 });
 
+test('the verified WPF base admits only its pristine SOFTWARE with the preserved supervisor', () => {
+  const serviced = 'cc6c6ee49702405dc2f8d8b1e12642692831bdfad873f34e783d9a0e5c6f999c';
+  assert.equal(validateBaseHandoff(serviced, admitted.supervisorSHA256), 'originalNativeSupervisor');
+  for (const supervisor of [null, '0'.repeat(64), admitted.softwareSHA256]) {
+    assert.throws(() => validateBaseHandoff(serviced, supervisor), /unsupported/);
+  }
+  assert.throws(() => validateBaseHandoff('0' + serviced.slice(1), admitted.supervisorSHA256), /unsupported/);
+});
+
 test('launcher provenance binds both source files, the checked compiler and exact executable bytes', () => {
   const f = build();
   validateLauncherBuild(f.manifest, f.source, f.binary);

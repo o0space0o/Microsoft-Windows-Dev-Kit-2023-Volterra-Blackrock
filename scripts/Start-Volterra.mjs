@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { ensurePrivateState } from '../app/private-state.mjs';
 import { prepareLiveWorkspace } from '../app/live-workspace.mjs';
 import { readSandboxPolicy } from '../app/sandbox-policy.mjs';
+import { startLauncherDiagnostics } from '../app/boot-diagnostics.mjs';
 
 const execute = promisify(execFile);
 const samePath = (left, right) => path.relative(path.resolve(left), path.resolve(right)) === '';
@@ -156,7 +157,8 @@ export async function launch(options) {
   const env = { ...process.env, VOLTERRA_CODEX_PATH: codex, VOLTERRA_GH_PATH: gh, VOLTERRA_GIT_PATH: git, VOLTERRA_PORT: String(options.port), PATH: `${path.dirname(git)};${tools};${process.env.PATH || ''}` };
   delete env.VOLTERRA_BROWSER_PID;
   delete env.VOLTERRA_BROWSER_STARTED_UTC;
-  let boot;
+  let boot, diagnostics, startupError;
+  try {
   if (options.boot) {
     if (!/^[A-Z]:$/i.test(env.SystemDrive || '') || !env.SystemRoot) throw new Error('The boot environment has no valid Windows system drive.');
     const systemRoot = `${env.SystemDrive}\\`;
@@ -175,6 +177,7 @@ export async function launch(options) {
       return ensurePrivateState({...options,root:live.applicationRoot});
     } : ensurePrivateState;
     boot = await prepareBootPaths({ root, systemRoot, ramdisk, edition, roots, privacy:bootPrivacy, readVolume: volume => nativeOutput(mountvol, [volume, '/L'], env) });
+    if (boot.ramdisk) diagnostics = startLauncherDiagnostics({ boot, root: live.applicationRoot, guard: ownedPath });
     if(boot.ramdisk) {
       root=live.applicationRoot; tools=path.join(root,'private','tools'); node=await ownedPath(path.join(tools,'node.exe'));
       codex=await ownedPath(path.join(tools,'codex.exe'));gh=await ownedPath(path.join(tools,'gh.exe'));git=await ownedPath(path.join(tools,'git','cmd','git.exe'));
@@ -238,6 +241,8 @@ export async function launch(options) {
     if (boot) await writeLaunchEvidence(boot.stateDirectory, { stage: 'Failed', edition: 'WinVOS', ...boot, stateWritable: true, stateSurvivedRestart: false, helperExitCode: exitCode ?? null, sourceHealthConfirmed: false }, {privacy:options=>ensurePrivateState({...options,root})});
     throw error;
   } finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); if (!stopped) child.kill(); }
+  } catch (error) { startupError = error; throw error; }
+  finally { await diagnostics?.stop(startupError); }
 }
 
 if (process.argv[1] && samePath(process.argv[1], fileURLToPath(import.meta.url))) {

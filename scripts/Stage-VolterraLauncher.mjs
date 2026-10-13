@@ -19,6 +19,10 @@ const nativeSoftwareSHA256 = '182a8b1454b07dc0fd9b0a0e63b5ae8100670e6b8cb32e8e25
 // Independent read-only parsing confirmed every key/value matches the guest
 // inspection, including Shell and EditionID; the supervisor is unchanged.
 const guestSoftwareSHA256 = '8018fdfee5171f1269d1fdc59ef646b8273fa85ecc2e41044609c009c97c4c90';
+// The same handoff after the official 26100.9549 WPF feature restores Segoe UI
+// faces. Independent pristine readback matched all five guest hive hashes,
+// the native supervisor, the official font bytes and all 387 retained INFs.
+const wpfSoftwareSHA256 = 'cc6c6ee49702405dc2f8d8b1e12642692831bdfad873f34e783d9a0e5c6f999c';
 const commandSoftwareSHA256 = '8d8589c2bb2aa62aa498e0736fa9232121f100c94c2a2d255ca9bc58c5b6a956';
 const supervisorSHA256 = '488b67f8368d206dabcf36ea4d6bfe23fe13bbd887cea275840b2d577a1953d7';
 const validHash = value => typeof value === 'string' && /^[a-f\d]{64}$/i.test(value);
@@ -40,7 +44,7 @@ async function readFile(file, maximum) {
 }
 
 export function validateBaseHandoff(softwareHash, supervisorHash) {
-  if ([nativeSoftwareSHA256, guestSoftwareSHA256].includes(softwareHash) && supervisorHash === supervisorSHA256) return 'originalNativeSupervisor';
+  if ([nativeSoftwareSHA256, guestSoftwareSHA256, wpfSoftwareSHA256].includes(softwareHash) && supervisorHash === supervisorSHA256) return 'originalNativeSupervisor';
   if (softwareHash === commandSoftwareSHA256 && supervisorHash === null) return 'commandShell';
   throw new Error(`The image has an unsupported SOFTWARE hive or native supervisor handoff (SOFTWARE ${softwareHash}; supervisor ${supervisorHash ?? 'missing'}).`);
 }
