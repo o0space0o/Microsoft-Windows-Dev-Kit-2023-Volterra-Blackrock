@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { readPrivateInput } from './private-state.mjs';
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex').toUpperCase();
+const invocationTimeoutMs = 120000;
 const timestamp = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$/.test(value) && Number.isFinite(Date.parse(value));
 const exactKeys = (value, keys) => value && !Array.isArray(value) && typeof value === 'object' && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 function bootTimestamp(dmtf) {
@@ -16,7 +17,7 @@ function bootTimestamp(dmtf) {
 }
 
 export function inspectWindowsFacts(value, { pid = 0, chrome, launchedAt, before, after } = {}) {
-  if (!Number.isSafeInteger(pid) || pid < 0 || pid > 2147483647 || !Number.isFinite(before) || !Number.isFinite(after) || before > after || after - before > 30000) throw new Error('Native Windows facts need a bounded invocation and process ID.');
+  if (!Number.isSafeInteger(pid) || pid < 0 || pid > 2147483647 || !Number.isFinite(before) || !Number.isFinite(after) || before > after || after - before > invocationTimeoutMs) throw new Error('Native Windows facts need a bounded invocation and process ID.');
   if (!exactKeys(value, ['version', 'kind', 'status', 'observedAt', 'boot', 'browser', 'errors']) || value.version !== 1 || value.kind !== 'windowsFacts' || !['passed', 'blocked'].includes(value.status)
     || !timestamp(value.observedAt) || Date.parse(value.observedAt) < before - 2000 || Date.parse(value.observedAt) > after + 2000
     || !exactKeys(value.boot, ['observed', 'source', 'utc', 'dmtf']) || value.boot.source !== 'Win32_OperatingSystem.LastBootUpTime' || typeof value.boot.observed !== 'boolean'
@@ -70,7 +71,7 @@ export async function readWindowsFacts({ root, execute, guard, browserPid, brows
     inputs.push([full, bytes]);
   }
   const before = Date.now();
-  const observation = await execute(executable, pid ? ['--browser-pid', String(pid)] : [], { timeoutMs: 20000 });
+  const observation = await execute(executable, pid ? ['--browser-pid', String(pid)] : [], { timeoutMs: invocationTimeoutMs });
   const after = Date.now();
   if (![0, 1].includes(observation.code) || Buffer.byteLength(observation.stdout) > 32768) throw new Error('Native Windows facts could not return supported evidence.');
   for (const [file, original] of inputs) {

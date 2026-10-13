@@ -55,7 +55,7 @@ try{
  Mount-WindowsImage -ImagePath $wim -Index 1 -Path $mount|Out-Null; $mounted=$true
  & $node (Join-Path $PSScriptRoot 'Prepare-ImageSource.mjs') --copy $SourceReceipt $mount > (Join-Path $current 'source-overlay.json') 2> (Join-Path $current 'source-overlay-error.txt')
  if($LASTEXITCODE-ne0){throw 'Checked source overlay failed'}
- & $node (Join-Path $PSScriptRoot 'Stage-WindowsFacts.mjs') $SourceReceipt $workspace $mount verify > (Join-Path $current 'native-verification.json') 2> (Join-Path $current 'native-verification-error.txt')
+ & $node (Join-Path $PSScriptRoot 'Stage-WindowsFacts.mjs') $SourceReceipt $workspace $mount copy > (Join-Path $current 'native-verification.json') 2> (Join-Path $current 'native-verification-error.txt')
  if($LASTEXITCODE-ne0){throw 'Source-bound native runtime verification failed'}
  Progress 'Verifying the preserved native startup handoff'
  $launcherArguments=@((Join-Path $PSScriptRoot 'Stage-VolterraLauncher.mjs'),$SourceReceipt,$workspace,$mount)

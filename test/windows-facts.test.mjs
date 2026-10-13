@@ -39,7 +39,35 @@ test('a failed provider preserves exact process proof while missing browser pres
   assert.equal(allowedSource('scripts/Unreviewed.cs'), false); assert.equal(allowedSource('private/tools/volterra-facts.exe'), false);
 });
 
-test('changed private binary or public facts source is rejected before native execution', async () => {
+test('slow native facts remain bounded and preserve observation, boot and process bindings', () => {
+  const slow = { ...options, after: options.before + 82322 };
+  const value = facts(); value.observedAt = '2026-10-11T12:01:32.3000000Z';
+  const observed = inspectWindowsFacts(value, slow);
+  assert.equal(observed.bootId, facts().boot.utc); assert.equal(observed.browserImageObserved, true);
+  assert.doesNotThrow(() => inspectWindowsFacts(value, { ...slow, after: slow.before + 120000 }));
+  assert.throws(() => inspectWindowsFacts(value, { ...slow, after: slow.before + 120001 }), /bounded invocation/);
+  for (const mutate of [
+    candidate => { candidate.observedAt = '2026-10-11T12:00:07.9990000Z'; },
+    candidate => { candidate.observedAt = '2026-10-11T12:01:34.3230000Z'; },
+    candidate => { candidate.browser.requestedPid++; },
+    candidate => { candidate.browser.creationUtc = '2026-10-11T12:01:31.0000000Z'; },
+    candidate => { candidate.browser.imagePath = 'C:\\Other\\chrome.exe'; },
+    candidate => { candidate.boot.utc = '2026-10-11T11:00:01.1234560Z'; }
+  ]) { const invalid = structuredClone(value); mutate(invalid); assert.throws(() => inspectWindowsFacts(invalid, slow)); }
+});
+
+test('a bounded provider timeout retains observed browser proof without accepting a boot identity', () => {
+  const value = facts(); value.status = 'blocked'; value.observedAt = '2026-10-11T12:01:50.0000000Z';
+  value.boot = { observed: false, source: 'Win32_OperatingSystem.LastBootUpTime', utc: null, dmtf: null };
+  value.errors = [{ stage: 'Boot identity', code: '0x80131501', message: 'Timed out' }];
+  const observed = inspectWindowsFacts(value, { ...options, after: options.before + 101000 });
+  assert.equal(observed.bootIdentityObserved, false); assert.equal(observed.bootId, undefined);
+  assert.equal(observed.browserImageObserved, true); assert.equal(observed.browserPid, options.pid);
+  value.status = 'passed';
+  assert.throws(() => inspectWindowsFacts(value, { ...options, after: options.before + 101000 }), /unsupported success/);
+});
+
+test('native invocation has a fixed deadline, propagates timeout and rejects changed provenance', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'volterra-facts-provenance-'));
   const hash = bytes => createHash('sha256').update(bytes).digest('hex').toUpperCase();
   try {
@@ -52,6 +80,15 @@ test('changed private binary or public facts source is rejected before native ex
       fs.writeFile(path.join(root, 'private', 'tools', 'volterra-facts-build.json'), JSON.stringify(manifest)),
       fs.writeFile(path.join(root, 'private', 'source-version.json'), JSON.stringify({ repository: 'o0space0o/Microsoft-Windows-Dev-Kit-2023-Volterra-Blackrock', commit }))
     ]);
+    const supported = { root, guard: async () => {}, execute: async (file, args, execution) => {
+      assert.equal(file, executable); assert.deepEqual(args, []); assert.equal(execution.timeoutMs, 120000);
+      const value = facts(); value.observedAt = new Date().toISOString().slice(0, -1) + '0000Z';
+      value.browser = { requestedPid: 0, observed: false, imagePath: null, creationUtc: null };
+      return { code: 0, stdout: JSON.stringify(value) };
+    } };
+    assert.equal((await readWindowsFacts(supported)).bootIdentityObserved, true);
+    const timeout = new Error('The native runtime probe timed out.');
+    await assert.rejects(readWindowsFacts({ ...supported, execute: async () => { throw timeout; } }), error => error === timeout);
     let calls = 0;
     const probe = { root, guard: async () => {}, execute: async () => { calls++; throw new Error('Native invocation unexpectedly reached.'); } };
     await fs.writeFile(executable, Buffer.alloc(2048, 2));

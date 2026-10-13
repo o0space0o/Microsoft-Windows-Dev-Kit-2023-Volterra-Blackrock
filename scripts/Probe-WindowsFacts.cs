@@ -53,7 +53,9 @@ internal static class ProbeWindowsFacts
             if (!Environment.Is64BitProcess) throw new InvalidOperationException("A native 64-bit Windows CLR process is required.");
             ConnectionOptions connection = new ConnectionOptions { EnablePrivileges = false };
             ManagementScope scope = new ManagementScope(@"\\.\root\cimv2", connection);
-            EnumerationOptions options = new EnumerationOptions { ReturnImmediately = false, Timeout = TimeSpan.FromSeconds(12) };
+            // Semi-synchronous enumeration applies the timeout while the provider
+            // produces its result. A synchronous Get can block beyond that limit.
+            EnumerationOptions options = new EnumerationOptions { ReturnImmediately = true, Timeout = TimeSpan.FromSeconds(100) };
             using (ManagementObjectSearcher search = new ManagementObjectSearcher(scope, new ObjectQuery("SELECT LastBootUpTime FROM Win32_OperatingSystem"), options))
             using (ManagementObjectCollection values = search.Get())
             {
